@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/opt/mast1c0re/**"
+            ],
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "c17",
+            "cppStandard": "c++14",
+            "intelliSenseMode": "gcc-x64",
+            "defines": [
+                "PS4=1",
+                "FIRMWARE=1001",
+                "EBOOT_VERSION=101"
+            ]
+        }
+    ],
+    "version": 4
+}

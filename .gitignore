@@ -1,0 +1,5 @@
+# Build objects
+build/
+
+# Binary files
+bin/
