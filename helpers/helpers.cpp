@@ -34,7 +34,7 @@ int64_t read_errno()
 
 #pragma region Syscall wrappers
 
-uint64_t syscall_wrappers[0x300] = {0};
+ptr64_t syscall_wrappers[0x300] = {0};
 
 bool buf_match(const uint8_t* buf, const uint8_t* pattern, uint32_t len)
 {
@@ -46,7 +46,7 @@ bool buf_match(const uint8_t* buf, const uint8_t* pattern, uint32_t len)
 // "48 c7 c0 ? ? ? ? 49 89 ca 0f 05" (12 bytes)
 void syscall_init()
 {
-    uint64_t libkernel_base = LIBKERNEL(0); // libkernel base
+    ptr64_t libkernel_base = LIBKERNEL(0); // libkernel base
     uint32_t size = 0x40000; // libkernel .text size
     printf_debug("syscall_init: libkernel_base %p\n", libkernel_base);
 
@@ -55,13 +55,13 @@ void syscall_init()
         printf_debug("syscall_init(): failed to allocate buffer\n");
         return;
     }
-    PS::memcpy(PVAR_TO_NATIVE(buffer), (uint64_t)libkernel_base, size);
+    PS::memcpy(PVAR_TO_NATIVE(buffer), libkernel_base, size);
 
     printf_debug("syscall_init(): scanning libkernel at %p\n", buffer);
     for (uint32_t i = 0; i < size - 11; i++) {
         if (!buf_match(buffer + i, (uint8_t*)"\x48\xC7\xC0", 3)) continue;
         if (!buf_match(buffer + i + 3 + 4, (uint8_t*)"\x49\x89\xCA\x0F\x05", 5)) continue;
-        syscall_wrappers[*(uint32_t*)(buffer + i + 3)] = (uint64_t)(libkernel_base + i);
+        syscall_wrappers[*(uint32_t*)(buffer + i + 3)] = libkernel_base + i;
         i += 11;
     }
     PS2::free((void*)buffer);
@@ -377,7 +377,7 @@ int32_t aio_submit_cmd(
     SceKernelAioSubmitId ids[]
 )
 {
-    // uint64_t addr = 0;
+    // ptr64_t addr = 0;
     // if (cmd == SCE_KERNEL_AIO_CMD_READ)
     //     addr = LIB_KERNEL_SCE_KERNEL_AIO_SUBMIT_READ_COMMANDS;
     // else if (cmd == SCE_KERNEL_AIO_CMD_WRITE)
@@ -395,10 +395,10 @@ int32_t aio_submit_cmd(
     int32_t ret = PS::Breakout::call(
         // LIBKERNEL(addr),
         syscall_wrappers[SYS_AIO_SUBMIT_CMD],
-        (uint64_t)cmd,
+        cmd,
         PVAR_TO_NATIVE(reqs),
-        (uint64_t)num_reqs,
-        (uint64_t)prio,
+        num_reqs,
+        prio,
         PVAR_TO_NATIVE(ids)
     );
     if (ret != 0) printf_debug("aio_submit_cmd returned: %d errno: %p\n", ret, read_errno());
@@ -411,7 +411,7 @@ int32_t aio_submit_cmd(
 
 typedef uint32_t useconds_t;
 
-int64_t aio_multi_wait(
+int32_t aio_multi_wait(
     SceKernelAioSubmitId ids[],
     uint32_t num_ids,
     SceKernelAioError aio_errors[],
@@ -423,9 +423,9 @@ int64_t aio_multi_wait(
         // LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_WAIT_REQUESTS),
         syscall_wrappers[SYS_AIO_MULTI_WAIT],
         PVAR_TO_NATIVE(ids),
-        (uint64_t)num_ids,
+        num_ids,
         PVAR_TO_NATIVE(aio_errors),
-        (uint64_t)mode,
+        mode,
         PVAR_TO_NATIVE(usec)
     );
     if (ret != 0) printf_debug("aio_multi_wait returned: %d errno: %p\n", ret, read_errno());
@@ -442,7 +442,7 @@ int32_t aio_multi_delete(
         // LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_DELETE_REQUESTS),
         syscall_wrappers[SYS_AIO_MULTI_DELETE],
         PVAR_TO_NATIVE(ids),
-        (uint64_t)num_ids,
+        num_ids,
         PVAR_TO_NATIVE(aio_errors)
     );
     if (ret != 0) printf_debug("aio_multi_delete returned: %d errno: %p\n", ret, read_errno());
@@ -459,7 +459,7 @@ int32_t aio_multi_cancel(
         // LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_CANCEL_REQUESTS),
         syscall_wrappers[SYS_AIO_MULTI_CANCEL],
         PVAR_TO_NATIVE(ids),
-        (uint64_t)num_ids,
+        num_ids,
         PVAR_TO_NATIVE(aio_errors)
     );
     if (ret != 0) printf_debug("aio_multi_cancel returned: %d errno: %p\n", ret, read_errno());
@@ -476,7 +476,7 @@ int32_t aio_multi_poll(
         // LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_POLL_REQUESTS),
         syscall_wrappers[SYS_AIO_MULTI_POLL],
         PVAR_TO_NATIVE(ids),
-        (uint64_t)num_ids,
+        num_ids,
         PVAR_TO_NATIVE(aio_errors)
     );
     if (ret != 0) printf_debug("aio_multi_poll returned: %d errno: %p\n", ret, read_errno());
