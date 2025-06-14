@@ -22,12 +22,16 @@ void printf_debug(const char* format, ...)
     PS::Debug.printf(debug_message);
 }
 
-int64_t read_errno()
+int64_t reset_errno()
 {
     int64_t reset = 0;
-    int64_t errno = DEREF(PS::__error());
     PS::memcpy(PS::__error(), PVAR_TO_NATIVE(&reset), sizeof(reset));
-    return errno;
+    return reset;
+}
+
+int64_t read_errno()
+{
+    return DEREF(PS::__error());
 }
 
 #pragma endregion
@@ -180,28 +184,28 @@ int32_t create_ipv6udp()
 // netinet6/in6.h
 #define IPV6_RTHDR 51
 
-int32_t get_rthdr(int32_t sd, ptr64_t val, socklen_t *len)
+int32_t get_rthdr(int32_t sd, void *val, socklen_t *len)
 {
     int32_t ret = PS::Breakout::call(
         LIBKERNEL(LIB_KERNEL__GETSOCKOPT),
         sd,
         IPPROTO_IPV6,
         IPV6_RTHDR,
-        val,
+        PVAR_TO_NATIVE(val),
         PVAR_TO_NATIVE(len)
     );
     if (ret != 0) printf_debug("get_rthdr returned: %d errno: %p\n", ret, read_errno());
     return ret;
 }
 
-int32_t set_rthdr(int32_t sd, ptr64_t val, socklen_t len)
+int32_t set_rthdr(int32_t sd, void *val, socklen_t len)
 {
     int32_t ret = PS::Breakout::call(
         LIBKERNEL(LIB_KERNEL_SETSOCKOPT),
         sd,
         IPPROTO_IPV6,
         IPV6_RTHDR,
-        val,
+        PVAR_TO_NATIVE(val),
         len
     );
     if (ret != 0) printf_debug("set_rthdr returned: %d errno: %p\n", ret, read_errno());
@@ -213,6 +217,7 @@ int32_t free_rthdrs(int32_t *sds, uint32_t num_sds)
     int32_t ret = 0;
     for (uint32_t i = 0; i < num_sds; i++)
     {
+        if (sds[i] < 0) continue;
         int32_t _ret = set_rthdr(sds[i], 0, 0);
         ret = _ret || ret;
     }
