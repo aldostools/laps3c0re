@@ -34,6 +34,27 @@ int64_t read_errno()
     return DEREF(PS::__error());
 }
 
+void hexdump(const uint8_t* data, size_t size)
+{
+    for (size_t i = 0; i < size; i += 16)
+    {
+        printf_debug("%p: ", data + i);
+
+        for (size_t j = 0; j < 16 && i + j < size; j++)
+            printf_debug("%02x ", data[i + j]);
+
+        printf_debug(" ");
+
+        for (size_t j = 0; j < 16 && i + j < size; j++)
+            if (data[i + j] >= ' ' && data[i + j] <= '~')
+                printf_debug("%c", data[i + j]);
+            else
+                printf_debug(".");
+
+        printf_debug("\n");
+    }
+}
+
 #pragma endregion
 
 #pragma region Syscall wrappers
@@ -225,6 +246,45 @@ int32_t free_rthdrs(int32_t *sds, uint32_t num_sds)
     return ret;
 }
 
+typedef int32_t SceKernelEventFlag;
+
+int32_t new_evf(SceKernelEventFlag *ef, uint64_t initPattern)
+{
+    int32_t ret = PS::Breakout::call(
+        LIBKERNEL(LIB_KERNEL_SCE_KERNEL_CREATE_EVENT_FLAG),
+        PVAR_TO_NATIVE(ef),
+        PVAR_TO_NATIVE(""),
+        0,
+        initPattern,
+        0
+    );
+    if (ret < 0) printf_debug("evf_create returned: %d errno: %p\n", ret, read_errno());
+    return ret;
+}
+
+int32_t set_evf_flags(SceKernelEventFlag ef, uint64_t bitPattern)
+{
+    int32_t ret = 0;
+    ret = PS::Breakout::call(
+        LIBKERNEL(LIB_KERNEL_SCE_KERNEL_CLEAR_EVENT_FLAG), ef, 0
+    );
+    if (ret != 0) printf_debug("evf_clear returned: %d errno: %p\n", ret, read_errno());
+    ret = PS::Breakout::call(
+        LIBKERNEL(LIB_KERNEL_SCE_KERNEL_SET_EVENT_FLAG), ef, bitPattern
+    );
+    if (ret != 0) printf_debug("evf_set returned: %d errno: %p\n", ret, read_errno());
+    return ret;
+}
+
+int32_t free_evf(SceKernelEventFlag ef)
+{
+    int32_t ret = PS::Breakout::call(
+        LIBKERNEL(LIB_KERNEL_SCE_KERNEL_DELETE_EVENT_FLAG), ef
+    );
+    if (ret != 0) printf_debug("evf_delete returned: %d errno: %p\n", ret, read_errno());
+    return ret;
+}
+
 #pragma endregion
 
 #pragma region ScePthread functions
@@ -341,6 +401,12 @@ int32_t scePthreadBarrierDestroy(ScePthreadBarrier *barrier)
 
 #pragma region SceAIO functions
 
+// SceAIO submit command states
+#define SCE_KERNEL_AIO_STATE_NOTIFIED       0x10000
+#define SCE_KERNEL_AIO_STATE_SUBMITTED      1
+#define SCE_KERNEL_AIO_STATE_PROCESSING     2
+#define SCE_KERNEL_AIO_STATE_COMPLETED      3
+#define SCE_KERNEL_AIO_STATE_ABORTED        4
 // SceAIO submit commands
 #define SCE_KERNEL_AIO_CMD_READ     0x001
 #define SCE_KERNEL_AIO_CMD_WRITE    0x002
@@ -353,8 +419,11 @@ int32_t scePthreadBarrierDestroy(ScePthreadBarrier *barrier)
 #define SCE_KERNEL_AIO_PRIORITY_HIGH    3
 
 typedef struct SceKernelAioResult {
+    // errno / SCE error code / number of bytes processed
     int64_t returnValue;
+    // SCE_KERNEL_AIO_STATE_*
     uint32_t state;
+    uint32_t _pad;
 } SceKernelAioResult;
 
 typedef struct {
@@ -494,7 +563,7 @@ int32_t aio_multi_poll(
 
 // Helper to spray AIO requests
 // Defaults to `multi` flag enabed, `cmd` set to read
-// If `mutli` is true, allocate `loops * num_reqs` sized `ids` buffer
+// If `mutli` is true, allocate `ids` array with length: `loops * num_reqs`
 void spray_aio(
     SceKernelAioSubmitId* ids,
     uint32_t loops,
