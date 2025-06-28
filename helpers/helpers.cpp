@@ -166,7 +166,6 @@ int32_t get_priority(rtprio_s *rtprio)
     return ret;
 }
 
-// sys/socket.h
 #define AF_UNIX 1
 #define AF_INET 2
 #define AF_INET6_ 28
@@ -175,6 +174,8 @@ int32_t get_priority(rtprio_s *rtprio)
 #define SOL_SOCKET 0xffff
 #define IPPROTO_UDP 17
 #define IPPROTO_TCP 6
+#define IPV6_2292PKTOPTIONS 25
+#define IPV6_TCLASS 61
 
 struct unixpair_s
 {

