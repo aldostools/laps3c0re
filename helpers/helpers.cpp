@@ -175,6 +175,9 @@ int32_t get_priority(rtprio_s *rtprio)
 #define IPPROTO_UDP 17
 #define IPPROTO_TCP 6
 #define IPV6_2292PKTOPTIONS 25
+#define IPV6_PKTINFO 46
+#define IPV6_NEXTHOP 48
+#define IPV6_RTHDR 51
 #define IPV6_TCLASS 61
 
 struct unixpair_s
@@ -202,9 +205,6 @@ int32_t create_ipv6udp()
     if (sd < 0) printf_debug("create_ipv6udp returned: %d errno: %p\n", sd, read_errno());
     return sd;
 }
-
-// netinet6/in6.h
-#define IPV6_RTHDR 51
 
 int32_t get_rthdr(int32_t sd, void *val, socklen_t *len)
 {

