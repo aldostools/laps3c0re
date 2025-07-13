@@ -182,8 +182,8 @@ int32_t get_priority(rtprio_s *rtprio)
 
 struct unixpair_s
 {
-    uint32_t block_fd;
-    uint32_t unblock_fd;
+    int32_t block_fd;
+    int32_t unblock_fd;
 };
 
 int32_t create_unixpair(unixpair_s *unixpair)
@@ -204,6 +204,16 @@ int32_t create_ipv6udp()
     int32_t sd = PS::socket(AF_INET6_, SOCK_DGRAM, IPPROTO_UDP);
     if (sd < 0) printf_debug("create_ipv6udp returned: %d errno: %p\n", sd, read_errno());
     return sd;
+}
+
+int32_t create_pipe(int32_t *pipe_fds)
+{
+    int32_t ret = PS::Breakout::call(
+        LIBKERNEL(LIB_KERNEL_PIPE),
+        PVAR_TO_NATIVE(pipe_fds)
+    );
+    if (ret != 0) printf_debug("create_pipe returned: %d errno: %p\n", ret, read_errno());
+    return ret;
 }
 
 int32_t get_rthdr(int32_t sd, void *val, socklen_t *len)
