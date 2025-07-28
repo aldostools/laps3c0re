@@ -5,6 +5,10 @@
 
 #if defined(PS4) && PS4
 
+// pcpu
+#define PCPU_CURTHREAD 0x0
+// thread
+#define TD_PROC 0x8
 // proc
 #define PROC_FD 0x48
 #define PROC_PID 0xb0
@@ -34,6 +38,10 @@
 
 #elif defined(PS5) && PS5
 
+// pcpu
+#define PCPU_CURTHREAD 0x0 // Double-check this !!!
+// thread
+#define TD_PROC 0x8 // Double-check this !!!
 // proc
 #define PROC_FD 0x48
 #define PROC_PID 0xbc

