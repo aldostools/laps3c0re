@@ -21,6 +21,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>. */
 #include "../helpers/kernel_memory.cpp"
 #include "../helpers/offsets.cpp"
 
+extern "C" {
+    extern const uint8_t payload_start[];
+    extern const uint8_t payload_end[];
+}
+
 int32_t err = 0; // Global error variable
 
 #define CPU_CORE 2
@@ -1344,6 +1349,9 @@ void main()
 
     // Initialize syscall wrappers
     syscall_init();
+
+    printf_debug("payload_start: %p, payload_end: %p, size: %d\n",
+        payload_start, payload_end, payload_end - payload_start);
 
     // TODO: Fix this mess !!!
     // STAGE 0: Setup
