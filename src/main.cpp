@@ -801,6 +801,13 @@ int32_t make_aliased_pktopts()
 {
     int32_t *sds = setup_data.sds;
 
+    // Free pktopts objects
+    for (uint32_t i = 0; i < NUM_SDS; i++)
+    {
+        if (sds[i] < 0) continue; // Skip invalid sockets
+        PS::setsockopt(sds[i], IPPROTO_IPV6, IPV6_2292PKTOPTIONS, 0, 0);
+    }
+
     for (uint32_t loop = 0; loop < NUM_ALIAS * 10; loop++)
     {
         for (uint32_t i = 0; i < NUM_SDS; i++)
