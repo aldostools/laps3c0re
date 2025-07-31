@@ -50,8 +50,8 @@ class ROP_Chain
                 return;
             }
             chain = chain_buf;
-            push_padding(1); // Required for setjmp
             chain_size = size;
+            push_padding(1); // Required for setjmp
             _is_initialized = true;
         }
     
@@ -63,6 +63,7 @@ class ROP_Chain
         void reset()
         {
             chain_index = 0;
+            push_padding(1);
         }
     
         int32_t execute(ScePthread *thread = nullptr)
