@@ -2,6 +2,8 @@
 
 
 #define BASE 0xffffffff82200000
+#define PAGE_SIZE 0x4000
+#define ROUND_PG(x) (((x) + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1))
 
 #if defined(PS4) && PS4
 
@@ -9,6 +11,9 @@
 #define PCPU_CURTHREAD 0x0
 // thread
 #define TD_PROC 0x8
+#define TD_KSTACK 0x3F0
+// kstack (assuming it occupies 1 PAGE_SIZE)
+#define KSTACK_FRAME_OFFSET 0x3AB0
 // proc
 #define PROC_UCRED 0x40
 #define PROC_FD 0x48
@@ -49,17 +54,6 @@
 #define K_SYS_READ_RET_SKIP_CHECK 0x25fe03
 #define K_WRITE 0x2602b0
 #define K_KERNEL_MAP 0x227bef8
-
-// 002d236e 48 89 de        MOV        RSI=>DAT_01a5c4f0,RBX
-// 002d2371 48 83 c4 18     ADD        RSP,0x18
-// 002d2375 5b              POP        RBX
-// 002d2376 41 5c           POP        R12
-// 002d2378 41 5d           POP        R13
-// 002d237a 41 5e           POP        R14
-// 002d237c 41 5f           POP        R15
-// 002d237e 5d              POP        RBP
-// 002d237f e9 9c 78        JMP        FUN_00109c20
-//           e3 ff
 #define K_XILL 0x2d2370
 
 #define K_SETIDT 0x7b460

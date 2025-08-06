@@ -12,6 +12,14 @@ struct pipebuf {
 	ptr64_t  buffer; // 0x10 kva of buffer
 };
 
+struct KernelMemoryArgs {
+    int32_t head_sd;
+    int32_t rw_sd;
+    int32_t *pipes;
+    ptr64_t pipe_p;
+    ptr64_t pipe_buffer;
+};
+
 class Kernel_Memory
 {
     private:
@@ -26,23 +34,21 @@ class Kernel_Memory
 
     public:
         // Initialize the Kernel Memory.
-        Kernel_Memory(
-            int32_t head_sd, int32_t rw_sd,
-            int32_t *pipes, ptr64_t pipe_p,
-            ptr64_t pipe_buffer = 0
-        )
+        Kernel_Memory(KernelMemoryArgs *kmem_args)
         {
-            if (head_sd < 0 || rw_sd < 0 || !pipes || !pipe_p) {
-                printf_debug("Kernel_Memory: Invalid parameters!\n");
+            if (!kmem_args || kmem_args->head_sd < 0 || kmem_args->rw_sd < 0
+                || !kmem_args->pipes || !kmem_args->pipe_p)
+            {
+                printf_debug("Kernel_Memory: Invalid arguments!\n");
                 return;
             }
 
-            this->head_sd = head_sd;
-            this->rw_sd = rw_sd;
-            this->pipes[0] = pipes[0];
-            this->pipes[1] = pipes[1];
-            this->pipe_p = pipe_p;
-            this->pipe_buffer = pipe_buffer;
+            this->head_sd = kmem_args->head_sd;
+            this->rw_sd = kmem_args->rw_sd;
+            this->pipes[0] = kmem_args->pipes[0];
+            this->pipes[1] = kmem_args->pipes[1];
+            this->pipe_p = kmem_args->pipe_p;
+            this->pipe_buffer = kmem_args->pipe_buffer;
             // Maximize .size
             *(uint32_t*)(this->data_buf + 0x0c) = 0x40000000;
         }
@@ -112,7 +118,7 @@ class Kernel_Memory
 
             PS::read(pipes[0], dst, len);
 
-            // Restring .buffer
+            // Restoring .buffer
             *(uint64_t*)data_buf = pipe_buffer;
             PS::setsockopt(
                 rw_sd, IPPROTO_IPV6, IPV6_PKTINFO, data_buf, sizeof(data_buf)

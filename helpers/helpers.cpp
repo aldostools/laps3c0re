@@ -287,6 +287,19 @@ int32_t set_evf_flags(SceKernelEventFlag ef, uint64_t bitPattern)
     return ret;
 }
 
+int32_t poll_evf(SceKernelEventFlag ef, uint64_t bitPattern, uint64_t *result)
+{
+    int32_t ret = PS::Breakout::call(
+        LIBKERNEL(LIB_KERNEL_SCE_KERNEL_POLL_EVENT_FLAG),
+        ef,
+        bitPattern,
+        0x01, // EVF_WAITMODE_AND
+        PVAR_TO_NATIVE(result)
+    );
+    // if (ret != 0) printf_debug("evf_poll returned: %d errno: %p\n", ret, read_errno());
+    return ret;
+}
+
 int32_t free_evf(SceKernelEventFlag ef)
 {
     int32_t ret = PS::Breakout::call(
