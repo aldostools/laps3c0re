@@ -59,6 +59,7 @@ void hexdump(const uint8_t* data, size_t size)
 
 #pragma region Syscall wrappers
 
+// @deprecated
 ptr64_t syscall_wrappers[0x300] = {0};
 
 bool buf_match(const uint8_t* buf, const uint8_t* pattern, uint32_t len)
@@ -68,6 +69,7 @@ bool buf_match(const uint8_t* buf, const uint8_t* pattern, uint32_t len)
     return true;
 }
 
+// @deprecated
 // "48 c7 c0 ? ? ? ? 49 89 ca 0f 05" (12 bytes)
 void syscall_init()
 {
@@ -475,25 +477,23 @@ int32_t aio_submit_cmd(
     SceKernelAioSubmitId ids[]
 )
 {
-    // ptr64_t addr = 0;
-    // if (cmd == SCE_KERNEL_AIO_CMD_READ)
-    //     addr = LIB_KERNEL_SCE_KERNEL_AIO_SUBMIT_READ_COMMANDS;
-    // else if (cmd == SCE_KERNEL_AIO_CMD_WRITE)
-    //     addr = LIB_KERNEL_SCE_KERNEL_AIO_SUBMIT_WRITE_COMMANDS;
-    // else if (cmd == SCE_KERNEL_AIO_CMD_READ | SCE_KERNEL_AIO_CMD_MULTI)
-    //     addr = LIB_KERNEL_SCE_KERNEL_AIO_SUBMIT_READ_COMMANDS_MULTIPLE;
-    // else if (cmd == SCE_KERNEL_AIO_CMD_WRITE | SCE_KERNEL_AIO_CMD_MULTI)
-    //     addr = LIB_KERNEL_SCE_KERNEL_AIO_SUBMIT_WRITE_COMMANDS_MULTIPLE;
-    // else
-    // {
-    //     printf_debug("aio_submit_cmd: Invalid command %x\n", cmd);
-    //     return -1;
-    // }
+    ptr64_t addr = 0;
+    if (cmd == 0x1002) // SCE_KERNEL_AIO_CMD_WRITE | SCE_KERNEL_AIO_CMD_MULTI
+        addr = LIB_KERNEL_SCE_KERNEL_AIO_SUBMIT_WRITE_COMMANDS_MULTIPLE;
+    else if (cmd == 0x1001) // SCE_KERNEL_AIO_CMD_READ | SCE_KERNEL_AIO_CMD_MULTI
+        addr = LIB_KERNEL_SCE_KERNEL_AIO_SUBMIT_READ_COMMANDS_MULTIPLE;
+    else if (cmd == SCE_KERNEL_AIO_CMD_READ)
+        addr = LIB_KERNEL_SCE_KERNEL_AIO_SUBMIT_READ_COMMANDS;
+    else if (cmd == SCE_KERNEL_AIO_CMD_WRITE)
+        addr = LIB_KERNEL_SCE_KERNEL_AIO_SUBMIT_WRITE_COMMANDS;
+    else
+    {
+        printf_debug("aio_submit_cmd: Invalid command %x\n", cmd);
+        return -1;
+    }
 
     int32_t ret = PS::Breakout::call(
-        // LIBKERNEL(addr),
-        syscall_wrappers[SYS_AIO_SUBMIT_CMD],
-        cmd,
+        LIBKERNEL(addr),
         PVAR_TO_NATIVE(reqs),
         num_reqs,
         prio,
@@ -518,8 +518,7 @@ int32_t aio_multi_wait(
 )
 {
     int32_t ret = PS::Breakout::call(
-        // LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_WAIT_REQUESTS),
-        syscall_wrappers[SYS_AIO_MULTI_WAIT],
+        LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_WAIT_REQUESTS),
         PVAR_TO_NATIVE(ids),
         num_ids,
         PVAR_TO_NATIVE(aio_errors),
@@ -537,8 +536,7 @@ int32_t aio_multi_delete(
 )
 {
     int32_t ret = PS::Breakout::call(
-        // LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_DELETE_REQUESTS),
-        syscall_wrappers[SYS_AIO_MULTI_DELETE],
+        LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_DELETE_REQUESTS),
         PVAR_TO_NATIVE(ids),
         num_ids,
         PVAR_TO_NATIVE(aio_errors)
@@ -554,8 +552,7 @@ int32_t aio_multi_cancel(
 )
 {
     int32_t ret = PS::Breakout::call(
-        // LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_CANCEL_REQUESTS),
-        syscall_wrappers[SYS_AIO_MULTI_CANCEL],
+        LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_CANCEL_REQUESTS),
         PVAR_TO_NATIVE(ids),
         num_ids,
         PVAR_TO_NATIVE(aio_errors)
@@ -571,8 +568,7 @@ int32_t aio_multi_poll(
 )
 {
     int32_t ret = PS::Breakout::call(
-        // LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_POLL_REQUESTS),
-        syscall_wrappers[SYS_AIO_MULTI_POLL],
+        LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_POLL_REQUESTS),
         PVAR_TO_NATIVE(ids),
         num_ids,
         PVAR_TO_NATIVE(aio_errors)

