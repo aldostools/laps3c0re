@@ -3,3 +3,6 @@ build/
 
 # Binary files
 bin/
+
+# Stage2 files
+stage2/
