@@ -1591,7 +1591,7 @@ int32_t run_payload()
     // Preparing sys_write() arguments
     char message[] = "\n!!! HELLO FROM KERNEL !!!\n\n";
     struct write_args_s { int32_t fd; ptr64_t buf; size_t nbyte; }
-    write_args = { PS::Debug.sock, PVAR_TO_NATIVE(message), sizeof(message) };
+    write_args = { debug_sock, PVAR_TO_NATIVE(message), sizeof(message) };
     // Copying write_args to kernel memory
     kmemory.copyin(&write_args, kstack + 0x100, sizeof(write_args));
 
@@ -1867,9 +1867,6 @@ void main()
 {
     // PS2 Breakout
     PS::Breakout::init();
-
-    // Attempt to connect to debug server
-    PS::Debug.connect(IP(192, 168, 1, 39), 9023);
 
     // HELLO EVERYNYAN!
     Okage::printf("HELL%d\nEVERYNYAN!\n", 0);

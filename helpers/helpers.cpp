@@ -6,8 +6,29 @@
 
 typedef uint64_t ptr64_t; // void *
 
+int32_t debug_sock = -1;
+
+int32_t connectToDebug() {
+    debug_sock = PS::socket(AF_INET, SOCK_DGRAM, 0);
+    if (debug_sock < 0) return -1;
+
+    sockaddr_in remote = {0};
+    remote.sin_family = AF_INET;
+    remote.sin_addr.s_addr = IP(192, 168, 1, 39);
+    remote.sin_port = PS::htons(9023);
+
+    if (PS::connect(debug_sock, (sockaddr*)&remote, sizeof(remote)) < 0) {
+        PS::close(debug_sock);
+        return -1;
+    }
+
+    return debug_sock;
+}
+
 void printf_debug(const char* format, ...)
 {
+    if (debug_sock < 0 && connectToDebug() > 0)
+        printf_debug("Connected to debug server! Socket: %d\n", debug_sock);
     va_list args;
     va_start(args, format);
     char debug_message[8192] = {0};
@@ -19,7 +40,7 @@ void printf_debug(const char* format, ...)
         PVAR_TO_NATIVE(debug_message),
         0
     );
-    PS::Debug.printf(debug_message);
+    PS::writeAll(debug_sock, debug_message, PS2::strlen(debug_message));
 }
 
 int64_t reset_errno()
