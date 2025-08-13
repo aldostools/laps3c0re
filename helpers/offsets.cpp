@@ -152,7 +152,7 @@
 
 #define K_SYS_READ_RET 0x2b207a
 #define K_SYS_READ_RET_SKIP_CHECK 0x2b2083
-#define K_WRITE 0x2b2083
+#define K_WRITE 0x2b2530
 
 #define K_KERNEL_MAP 0x2147830
 #define K_XILL 0x41fae0
