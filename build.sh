@@ -26,6 +26,15 @@ make clean
 make SYSTEM=PS4 FIRMWARE=10.01 EBOOT_VERSION=101 PAYLOAD=./stage2/stage2_1001.bin
 
 make clean
+make SYSTEM=PS4 FIRMWARE=10.50 EBOOT_VERSION=101 PAYLOAD=./stage2/stage2_1050.bin
+
+make clean
+make SYSTEM=PS4 FIRMWARE=10.70 EBOOT_VERSION=101 PAYLOAD=./stage2/stage2_1070.bin
+
+make clean
+make SYSTEM=PS4 FIRMWARE=10.71 EBOOT_VERSION=101 PAYLOAD=./stage2/stage2_1071.bin
+
+make clean
 make SYSTEM=PS4 FIRMWARE=11.00 EBOOT_VERSION=101 PAYLOAD=./stage2/stage2_1100.bin
 
 make clean
