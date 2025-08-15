@@ -2,7 +2,9 @@
 build/
 
 # Binary files
-bin/
+bin/*.elf
+bin/*.bin
+bin/*.card
 
 # Stage2 files
 stage2/
