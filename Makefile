@@ -38,7 +38,7 @@ LINKFLAGS	= -Wl,-z,max-page-size=0x1,--section-start=.MIPS.abiflags=$(ABI)
 CPPFLAGS	= -Tdata=$(DATA) -Ttext=$(TEXT) -mno-gpopt -nostartfiles -nostdlib -nodefaultlibs -ffreestanding $(LINKFLAGS) -I$(LIBMAST1C0RE)/include -I. -D$(SYSTEM)=1 -DFIRMWARE=$(FIRMWARE_NUM) -DEBOOT_VERSION=$(EBOOT_NUM) -Wno-error=jump-misses-init
 
 # Target
-TARGET = $(shell basename $(CURDIR))-$(SYSTEM)-$(FIRMWARE_DASH).elf
+TARGET = laps3c0re-$(SYSTEM)-$(FIRMWARE_DASH).elf
 
 all: compile
 
