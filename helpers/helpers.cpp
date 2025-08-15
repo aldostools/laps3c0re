@@ -76,44 +76,11 @@ void hexdump(const uint8_t* data, size_t size)
     }
 }
 
-#pragma endregion
-
-#pragma region Syscall wrappers
-
-// @deprecated
-ptr64_t syscall_wrappers[0x300] = {0};
-
 bool buf_match(const uint8_t* buf, const uint8_t* pattern, uint32_t len)
 {
     for (uint32_t i = 0; i < len; i++)
         if (buf[i] != pattern[i]) return false;
     return true;
-}
-
-// @deprecated
-// "48 c7 c0 ? ? ? ? 49 89 ca 0f 05" (12 bytes)
-void syscall_init()
-{
-    ptr64_t libkernel_base = LIBKERNEL(0); // libkernel base
-    uint32_t size = 0x40000; // libkernel .text size
-    printf_debug("syscall_init: libkernel_base %p\n", libkernel_base);
-
-    uint8_t* buffer = (uint8_t*)PS2::malloc(size);
-    if (!buffer) {
-        printf_debug("syscall_init(): failed to allocate buffer\n");
-        return;
-    }
-    PS::memcpy(PVAR_TO_NATIVE(buffer), libkernel_base, size);
-
-    printf_debug("syscall_init(): scanning libkernel at %p\n", buffer);
-    for (uint32_t i = 0; i < size - 11; i++) {
-        if (!buf_match(buffer + i, (uint8_t*)"\x48\xC7\xC0", 3)) continue;
-        if (!buf_match(buffer + i + 3 + 4, (uint8_t*)"\x49\x89\xCA\x0F\x05", 5)) continue;
-        syscall_wrappers[*(uint32_t*)(buffer + i + 3)] = libkernel_base + i;
-        i += 11;
-    }
-    PS2::free((void*)buffer);
-    printf_debug("syscall_init(): DONE! ;3\n");
 }
 
 #pragma endregion
