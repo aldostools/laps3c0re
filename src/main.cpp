@@ -320,7 +320,7 @@ int32_t race_one(SceKernelAioSubmitId id, int32_t sd_conn)
     );
     thr_chain.push_call(
         EBOOT(EBOOT_WRITE_STUB),
-        PS::Debug.sock, // This is supposed to be private btw
+        debug_sock,
         PVAR_TO_NATIVE("Exiting...\n"),
         11
     );
