@@ -12,9 +12,9 @@ A port of [Lapse](https://github.com/kmeps4/PSFree/blob/main/lapse.mjs), which i
 - [x] 10.00 / 10.01
 - [x] 10.50 / 10.70 / 10.71
 - [x] 11.00
-- [ ] 11.02 (TODO)
-- [ ] 11.50 / 11.52 (TODO)
-- [ ] 12.00 / 12.02 (TODO)
+- [x] 11.02
+- [x] 11.50 / 11.52
+- [x] 12.00 / 12.02
 - [ ] ~~12.50 / 12.52 / ...~~ Unsupported, please revert or sell your console.
 
 **PS5:**  

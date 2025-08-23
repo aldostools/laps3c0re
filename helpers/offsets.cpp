@@ -348,6 +348,159 @@
 // add rsp, 0x28 ; pop rbp ; ret (48 83 c4 28 5d c3)
 #define G_ADD_RSP_28_POP_RBP_RET 0x4cb2da
 
+#elif FIRMWARE == 1102
+
+// Kernel addresses
+#define K_EVF_OFFSET 0x7fc22f
+#define K_CPUID_TO_PCPU 0x212c840
+#define K_PRISON0 0x111f830
+#define K_ROOTVNODE 0x2116640
+#define K_SYS_READ_RET 0xdcdaa
+#define K_SYS_READ_RET_SKIP_CHECK 0xdcdb3
+#define K_WRITE 0xdd260
+#define K_KERNEL_MAP 0x21ff130
+#define K_XILL 0x2d2390
+#define K_SETIDT 0x25bdd0
+#define K_KMEM_ALLOC 0x245e30
+// (03)
+#define K_KMEM_ALLOC_PATCH1 0x245efc
+// (03)
+#define K_KMEM_ALLOC_PATCH2 0x245f04
+#define K_MEMCPY 0x2dde10
+
+// Gadgets
+// ret (c3)
+#define G_RET 0x7fe
+// pop rdi ; ret (5f c3)
+#define G_POP_RDI_RET 0x3eb2d9
+// pop rsi ; ret (5e c3)
+#define G_POP_RSI_RET 0x196949
+// pop rdx ; ret (5a c3)
+#define G_POP_RDX_RET 0x52f62
+// pop rcx ; ret (59 c3)
+#define G_POP_RCX_RET 0x1170a
+// pop r8 ; pop rbp ; ret (41 58 5d c3)
+#define G_POP_R8_POP_RBP_RET 0x87247
+// pop rax ; ret (58 c3)
+#define G_POP_RAX_RET 0x1172e
+// pop rbp ; ret (5d c3)
+#define G_POP_RBP_RET 0x8df
+// pop rsp ; ret (5c c3)
+#define G_POP_RSP_RET 0x51ffb
+// mov byte ptr [rcx], al ; ret (88 01 c3)
+#define G_MOV_BYTE_PTR_RCX_AL_RET 0x16ae78
+// pop qword ptr [rdx] ; ret (8f 02 c3)
+#define G_POP_QWORD_PTR_RDX_RET 0xace212
+// mov qword ptr [rdx], rax ; pop rbp ; ret (48 89 02 5d c3)
+#define G_MOV_QWORD_PTR_RDX_RAX_POP_RBP_RET 0x2d881
+// mov cr0, rsi ; test rsi, 0x10000 ; jnz 2 ; ud2 ; mov eax, 1 ; ret 
+// (0f 22 c6 48 f7 c6 00 00 01 00 75 02 0f 0b b8 01 00 00 00 c3)
+#define G_MOV_CR0_RSI_UD2_MOV_EAX_1_RET 0x2f12b9
+// add rsp, 0x28 ; pop rbp ; ret (48 83 c4 28 5d c3)
+#define G_ADD_RSP_28_POP_RBP_RET 0x4cb26a
+
+#elif (FIRMWARE == 1150 || FIRMWARE == 1152)
+
+// Kernel addresses
+#define K_EVF_OFFSET 0x784318
+#define K_CPUID_TO_PCPU 0x21abfe0
+#define K_PRISON0 0x111fa18
+#define K_ROOTVNODE 0x2136e90
+#define K_SYS_READ_RET 0x20a13a
+#define K_SYS_READ_RET_SKIP_CHECK 0x20a143
+#define K_WRITE 0x20a5f0
+#define K_KERNEL_MAP 0x22d1d50
+#define K_XILL 0x1c1c40
+#define K_SETIDT 0x16c3d0
+#define K_KMEM_ALLOC 0x4657a0
+// (03)
+#define K_KMEM_ALLOC_PATCH1 0x46586c
+// (03)
+#define K_KMEM_ALLOC_PATCH2 0x465874
+#define K_MEMCPY 0x2bd3a0
+
+// Gadgets
+// ret (c3)
+#define G_RET 0x08e0
+// pop rdi ; ret (5f c3)
+#define G_POP_RDI_RET 0x2db3cd
+// pop rsi ; ret (5e c3)
+#define G_POP_RSI_RET 0x72e3e
+// pop rdx ; ret (5a c3)
+#define G_POP_RDX_RET 0x219bb1
+// pop rcx ; ret (59 c3)
+#define G_POP_RCX_RET 0x1d5c7
+// pop r8 ; pop rbp ; ret (41 58 5d c3)
+#define G_POP_R8_POP_RBP_RET 0x3bbb87
+// pop rax ; ret (58 c3)
+#define G_POP_RAX_RET 0x1ca05
+// pop rbp ; ret (5d c3)
+#define G_POP_RBP_RET 0x8df
+// pop rsp ; ret (5c c3)
+#define G_POP_RSP_RET 0x1c9dc
+// mov byte ptr [rcx], al ; ret (88 01 c3)
+#define G_MOV_BYTE_PTR_RCX_AL_RET 0x31a668
+// pop qword ptr [rdx] ; ret (8f 02 c3)
+#define G_POP_QWORD_PTR_RDX_RET 0xad09c2
+// mov qword ptr [rdx], rax ; pop rbp ; ret (48 89 02 5d c3)
+#define G_MOV_QWORD_PTR_RDX_RAX_POP_RBP_RET 0xe4141
+// mov cr0, rsi ; test rsi, 0x10000 ; jnz 2 ; ud2 ; mov eax, 1 ; ret 
+// (0f 22 c6 48 f7 c6 00 00 01 00 75 02 0f 0b b8 01 00 00 00 c3)
+#define G_MOV_CR0_RSI_UD2_MOV_EAX_1_RET 0x194679
+// add rsp, 0x28 ; pop rbp ; ret (48 83 c4 28 5d c3)
+#define G_ADD_RSP_28_POP_RBP_RET 0x4c9a1a
+
+#elif (FIRMWARE == 1200 || FIRMWARE == 1202)
+
+// Kernel addresses
+#define K_EVF_OFFSET 0x784798
+#define K_CPUID_TO_PCPU 0x21abfe0
+#define K_PRISON0 0x111fa18
+#define K_ROOTVNODE 0x2136e90
+#define K_SYS_READ_RET 0x20a21a
+#define K_SYS_READ_RET_SKIP_CHECK 0x20a223
+#define K_WRITE 0x20a6d0
+#define K_KERNEL_MAP 0x22d1d50
+#define K_XILL 0x2d2370
+#define K_SETIDT 0x16c3d0
+#define K_KMEM_ALLOC 0x4659e0
+// (03)
+#define K_KMEM_ALLOC_PATCH1 0x465aac
+// (03)
+#define K_KMEM_ALLOC_PATCH2 0x465ab4
+#define K_MEMCPY 0x2bd480
+
+// Gadgets
+// ret (c3)
+#define G_RET 0x8e0
+// pop rdi ; ret (5f c3)
+#define G_POP_RDI_RET 0x16c20d
+// pop rsi ; ret (5e c3)
+#define G_POP_RSI_RET 0x72e3e
+// pop rdx ; ret (5a c3)
+#define G_POP_RDX_RET 0x25d1c2
+// pop rcx ; ret (59 c3)
+#define G_POP_RCX_RET 0x1d5c7
+// pop r8 ; pop rbp ; ret (41 58 5d c3)
+#define G_POP_R8_POP_RBP_RET 0x3bbdc7
+// pop rax ; ret (58 c3)
+#define G_POP_RAX_RET 0x1ca05
+// pop rbp ; ret (5d c3)
+#define G_POP_RBP_RET 0x8df
+// pop rsp ; ret (5c c3)
+#define G_POP_RSP_RET 0x1c9dc
+// mov byte ptr [rcx], al ; ret (88 01 c3)
+#define G_MOV_BYTE_PTR_RCX_AL_RET 0x31a8a8
+// pop qword ptr [rdx] ; ret (8f 02 c3)
+#define G_POP_QWORD_PTR_RDX_RET 0xad0e82
+// mov qword ptr [rdx], rax ; pop rbp ; ret (48 89 02 5d c3)
+#define G_MOV_QWORD_PTR_RDX_RAX_POP_RBP_RET 0xe4141
+// mov cr0, rsi ; test rsi, 0x10000 ; jnz 2 ; ud2 ; mov eax, 1 ; ret 
+// (0f 22 c6 48 f7 c6 00 00 01 00 75 02 0f 0b b8 01 00 00 00 c3)
+#define G_MOV_CR0_RSI_UD2_MOV_EAX_1_RET 0x194679
+// add rsp, 0x28 ; pop rbp ; ret (48 83 c4 28 5d c3)
+#define G_ADD_RSP_28_POP_RBP_RET 0x4c9c5a
+
 #endif
 
 #elif defined(PS5) && PS5

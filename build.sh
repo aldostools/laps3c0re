@@ -38,6 +38,21 @@ make clean
 make SYSTEM=PS4 FIRMWARE=11.00 EBOOT_VERSION=101 PAYLOAD=./stage2/stage2_1100.bin
 
 make clean
+make SYSTEM=PS4 FIRMWARE=11.02 EBOOT_VERSION=101 PAYLOAD=./stage2/stage2_1102.bin
+
+make clean
+make SYSTEM=PS4 FIRMWARE=11.50 EBOOT_VERSION=101 PAYLOAD=./stage2/stage2_1150.bin
+
+make clean
+make SYSTEM=PS4 FIRMWARE=11.52 EBOOT_VERSION=101 PAYLOAD=./stage2/stage2_1152.bin
+
+make clean
+make SYSTEM=PS4 FIRMWARE=12.00 EBOOT_VERSION=101 PAYLOAD=./stage2/stage2_1200.bin
+
+make clean
+make SYSTEM=PS4 FIRMWARE=12.02 EBOOT_VERSION=101 PAYLOAD=./stage2/stage2_1202.bin
+
+make clean
 
 # PS5
 # make clean SYSTEM=PS5 FIRMWARE=0.00
