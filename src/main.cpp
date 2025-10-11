@@ -1416,7 +1416,7 @@ int32_t make_kernel_arw()
         kmemory.write64(d_rthdr_p, 0);
     }
 
-    printf_debug("* Corrupt pointers cleaned! (probably)\n");
+    printf_debug("* Corrupt pointers cleaned!\n");
 
     return err;
 }

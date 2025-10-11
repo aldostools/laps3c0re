@@ -18,7 +18,7 @@ A port of [Lapse](https://github.com/kmeps4/PSFree/blob/main/lapse.mjs), which i
 - [ ] ~~12.50 / 12.52 / ...~~ Unsupported, please revert or sell your console.
 
 **PS5:**  
-- TODO
+- [ ] 10.01 (🚧 WIP, probably)
 
 ## Setup Guide
 
@@ -47,7 +47,27 @@ A port of [Lapse](https://github.com/kmeps4/PSFree/blob/main/lapse.mjs), which i
 
 ## FAQ
 
-(TODO)
+- **Q:** What's this? Really!
+- **A:** It's a project that allows you to jailbreak your PS4/5 console, using the game: **Okage: Shadow King**.
+
+- **Q:** Who's this for?
+- **A:** It's for those who happen to have the game installed on their consoles, and to be on a supported FW version.
+
+- **Q:** My FW is unsupported, is there anything to do?
+- **A:** If you are on PS4, you could try reverting your console's FW, but that would be expensive and risky. Also, not all consoles are revertable, some might have an unsupported Syscon ship, others don't hold a previous FW state that is low enough, or they might had a factory reset. If you are on PS5, unfortunately, there arn't many options for you, you gotta wait for a new kernel exploit.
+
+- **Q:** I have a console on a supported FW, how do I install Okage?
+- **A:** Well, in order to install a digital-only game from the store, you gotta be on the latest FW, which would defeat the whole point. On PS4, there is a method that involves updating, installing the game, and then reverting back, which requires advanced Syscon and NOR manipulation to preserve the game license. On PS5, you're out of luck with this.
+
+- **Q:** Is it worth it?
+- **A:** IMO, if you don't have the game already, it's not really worth the hustle. There are already other entry points, LUA, BDJB and Y2JB, which are way easier to obtain. For instance, Y2JB should work on every PS5 FW as Youtube doesn't require a license to launch. On PS4, that's not the case, you should have Youtube installed from PSN and activated, so you'll end up doing the updating/reverting method as explained earlier. Check if your FW supports BDJB, or get a LUA game. Or simply, wait for a Webkit exploit :").
+
+- **Q:** Why bother then?
+- **A:** Because it's fun :). Also, I wanted to learn something new. And most importantly, I have the game installed on my PS4, and I wanted to switch to the new exploit as PPPwn is not convenient.
+
+- **Q:** ruby_chan.cpp?? 🤨
+- **A:** ...It's for the lulz 😅
+
 
 ## Credit
 
