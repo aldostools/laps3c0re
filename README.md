@@ -3,6 +3,9 @@ A port of [Lapse](https://github.com/kmeps4/PSFree/blob/main/lapse.mjs), which i
 
 ![Laps3c0re cover by @aldostools](./laps3c0re-cover-by-aldostools.png)
 
+> [!NOTE]  
+> Newer kernel exploits will not be implemented.
+
 ## Supported FWs
 
 **PS4:**  
@@ -18,7 +21,7 @@ A port of [Lapse](https://github.com/kmeps4/PSFree/blob/main/lapse.mjs), which i
 - [ ] ~~12.50 / 12.52 / ...~~ Unsupported, please revert or sell your console.
 
 **PS5:**  
-- [ ] ~~~10.01~~ Mast1c0re was confirmed not to be functional on higher PS5 FWs. Sadly, I don't own a PS5 to debug it.
+- [ ] ~~10.01~~ Mast1c0re was confirmed to be non functional on higher PS5 FWs. Sadly, I don't own a PS5 to debug it.
 
 ## Setup Guide
 
