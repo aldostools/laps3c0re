@@ -54,6 +54,6 @@ make SYSTEM=PS4 FIRMWARE=12.02 EBOOT_VERSION=101 PAYLOAD=./stage2/stage2_1202.bi
 
 make clean
 
-# PS5
+# PS5 (Unsupported :/)
 # make clean SYSTEM=PS5 FIRMWARE=0.00
 # make SYSTEM=PS5 FIRMWARE=0.00

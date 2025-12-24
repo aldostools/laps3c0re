@@ -1,10 +1,9 @@
 # Build objects
 build/
 
-# Binary files
-bin/*.elf
-bin/*.bin
-bin/*.card
+# Release files
+bin/PS*
+*.zip
 
 # Stage2 files
 stage2/
